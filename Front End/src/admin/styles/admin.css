@@ -1,0 +1,27 @@
+/* Rolaz Cutz admin theme: red, black and white (from the wireframes). */
+:root {
+  --rc-red: #c8102e;
+  --rc-red-dark: #a30d25;
+  --rc-ink: #111111;
+  --rc-muted: #5c5c5c;
+  --rc-line: #c9c7c0;
+  --rc-bg: #efeeea;
+  --rc-card: #ffffff;
+  --rc-surface: #f7f6f3;
+  --rc-error-bg: #fdecef;
+  --rc-focus: rgba(200, 16, 46, 0.45);
+  --rc-radius: 12px;
+}
+
+/* Hides text visually but keeps it for screen readers. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
