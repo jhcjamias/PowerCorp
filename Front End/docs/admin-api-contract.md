@@ -87,6 +87,34 @@ Other statuses: `404` if the id doesn't exist.
 - Don't allow a reschedule into the past.
 - Refunds and customer text messages on cancellation: **undecided**, to be settled with the client. The front end only sets the status.
 
+## 3. Schedule and time off (file: `src/admin/schedule/scheduleService.js`)
+
+### Objects
+```json
+// weeklyHours: always 7 items, one per day. day: Sunday = 0 ... Saturday = 6
+{ "day": 2, "open": true, "start": "11:00", "end": "19:00" }
+
+// timeOff
+{ "id": "t-1", "date": "2026-11-03", "endDate": "2026-11-05", "allDay": true,
+  "start": "", "end": "", "reason": "Family trip" }
+// part-day entry: allDay false, date === endDate, start "13:00", end "15:00"
+```
+- `reason` may be an empty string. `id` is a string.
+- Closed days still carry `start` / `end` (the front end keeps them so re-opening a day remembers the hours).
+
+### Endpoints
+| Call | Body | Response |
+|---|---|---|
+| `GET /api/schedule` | none | `{ "weeklyHours": [...7 items], "timeOff": [...] }` |
+| `PUT /api/schedule/hours` | `{ "weeklyHours": [...7 items] }` | `{ "weeklyHours": [...] }` |
+| `POST /api/schedule/time-off` | `{ date, endDate, allDay, start, end, reason }` | `201` the new time-off object (with its `id`) |
+| `DELETE /api/schedule/time-off/:id` | none | `204` |
+
+### Rules the back end should enforce
+- When working out which slots a customer can book, use `weeklyHours` and `timeOff` together: no slot outside open hours, none that touches a time-off entry, and none that would run past closing time.
+- Adding time off does **not** cancel appointments that already exist in that window. The admin page only warns about them (it compares against the appointment list) and Rolaz handles each one on the Appointments page.
+- Validate: `end` after `start`; `endDate` not before `date`; times as `HH:MM`.
+
 ## Coming later (will be added here as each page is built)
-Services and prices, schedule and time off, customers, dashboard numbers, reports.
+Services and prices, customers, dashboard numbers, reports.
 Services and prices should be the single list that both the admin and the customer booking page read.

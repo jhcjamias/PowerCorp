@@ -31,7 +31,12 @@ const routes = [
         component: () => import('@/admin/appointments/AppointmentsView.vue'),
         meta: { title: 'Appointments' },
       },
-      { path: 'schedule', name: 'admin-schedule', component: ComingSoon, meta: { title: 'Schedule & Time Off' } },
+      {
+        path: 'schedule',
+        name: 'admin-schedule',
+        component: () => import('@/admin/schedule/ScheduleView.vue'),
+        meta: { title: 'Schedule & Time Off' },
+      },
       { path: 'services', name: 'admin-services', component: ComingSoon, meta: { title: 'Services & Prices' } },
       { path: 'customers', name: 'admin-customers', component: ComingSoon, meta: { title: 'Customers' } },
       { path: 'reports', name: 'admin-reports', component: ComingSoon, meta: { title: 'Reports' } },
