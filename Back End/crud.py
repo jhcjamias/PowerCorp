@@ -174,6 +174,7 @@ DB_SETTINGS = (
 )
 
 
+<<<<<<< HEAD
 class ApiError(Exception):
     """An error with a status code and a plain-English message for the client."""
 
@@ -247,6 +248,10 @@ def is_duplicate_key(error):
 # ---------------------------------------------------------------------------
 # General helpers
 # ---------------------------------------------------------------------------
+=======
+<<<<<<< HEAD
+# ---------- helpers ----------
+>>>>>>> 5d06343 (basic structure of sql queries written)
 
 def clean(rows):
     """Convert MySQL values into JSON-serializable Python values."""
@@ -2228,9 +2233,195 @@ def update_cart_item():
 # Run development server only when this file is executed directly
 # ---------------------------------------------------------------------------
 
+<<<<<<< HEAD
 if __name__ == "__main__":
     app.run(
         host="127.0.0.1",
         port=int(os.getenv("PORT", "5000")),
         debug=app.config["DEBUG"],
     )
+=======
+    rows = execute_read_query(conn, """
+        SELECT staff_id, TIMESTAMPDIFF(MINUTE, start_time, end_time) AS minutes
+        FROM Appointment WHERE appointment_id = %s AND status = 'booked'
+    """, (appt_id,))
+    if not rows:
+        return jsonify({'error': 'no booked appointment with that id'}), 404
+
+    new_end = new_start + timedelta(minutes=rows[0]['minutes'])
+    if has_conflict(rows[0]['staff_id'], new_start, new_end, exclude_appt_id=appt_id):
+        return jsonify({'error': 'SLOT UNAVAILABLE'}), 409
+
+    execute_query(conn, "UPDATE Appointment SET start_time = %s, end_time = %s "
+                        "WHERE appointment_id = %s", (new_start, new_end, appt_id))
+    return jsonify({'confirmation_number': f"BB-{appt_id:06d}",
+                    'appointment_date': new_start.strftime("%Y-%m-%d"),
+                    'appointment_time': new_start.strftime("%H:%M:%S")})
+
+
+# 6c. Cancel appointment
+@app.route('/api/appointments/<int:appt_id>/cancel', methods=['POST'])
+def cancel_appointment(appt_id):
+    affected, _ = execute_query(conn, "UPDATE Appointment SET status = 'canceled' "
+                                      "WHERE appointment_id = %s AND status = 'booked'", (appt_id,))
+    if affected == 0:
+        return jsonify({'error': 'no booked appointment with that id'}), 404
+    return jsonify({'canceled': f"BB-{appt_id:06d}"})
+
+
+# 7. View appointment history
+@app.route('/api/customers/<int:customer_id>/appointments', methods=['GET'])
+def appointment_history(customer_id):
+    rows = execute_read_query(conn, """
+        SELECT a.customer_id,
+               DATE(a.start_time) AS appointment_date,
+               TIME(a.start_time) AS appointment_time,
+               sv.name AS service_name,
+               aps.price_at_booking AS cost,
+               COALESCE(p.status, 'unpaid') AS payment_status
+        FROM Appointment a
+        JOIN Appointment_Service aps ON a.appointment_id = aps.appointment_id
+        JOIN Service sv ON aps.service_id = sv.service_id
+        LEFT JOIN Payment p ON p.appointment_id = a.appointment_id
+        WHERE a.customer_id = %s
+        ORDER BY a.start_time DESC
+    """, (customer_id,))
+    return jsonify(clean(rows))
+
+
+# 8. Delete customer and everything tied to them (all-or-nothing)
+@app.route('/api/customers/<int:customer_id>', methods=['DELETE'])
+def delete_customer(customer_id):
+    statements = [
+        "DELETE FROM Review WHERE customer_id = %s",
+        "DELETE FROM User_Upload WHERE customer_id = %s",
+        """DELETE FROM Payment
+           WHERE order_id IN (SELECT order_id FROM Orders WHERE customer_id = %s)
+              OR appointment_id IN (SELECT appointment_id FROM Appointment WHERE customer_id = %s)""",
+        "DELETE FROM Order_Item WHERE order_id IN (SELECT order_id FROM Orders WHERE customer_id = %s)",
+        "DELETE FROM Orders WHERE customer_id = %s",
+        "DELETE FROM Cart_Item WHERE cart_id IN (SELECT cart_id FROM Cart WHERE customer_id = %s)",
+        "DELETE FROM Cart WHERE customer_id = %s",
+        """DELETE FROM Appointment_Service
+           WHERE appointment_id IN (SELECT appointment_id FROM Appointment WHERE customer_id = %s)""",
+        "DELETE FROM Appointment WHERE customer_id = %s",
+        "DELETE FROM Customer WHERE customer_id = %s",
+    ]
+    cursor = conn.cursor()
+    try:
+        for sql in statements:
+            cursor.execute(sql, (customer_id,) * sql.count('%s'))
+        customer_deleted = cursor.rowcount  # rowcount of the final statement
+        if customer_deleted == 0:
+            conn.rollback()
+            return jsonify({'error': 'customer not found'}), 404
+        conn.commit()
+        return jsonify({'deleted_customer_id': customer_id})
+    except Error:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+
+app.run()
+=======
+#####################################################
+#                                                   #
+#                                                   #
+#                  CREATE FUNCTIONS                 #
+#                                                   #
+#                                                   #
+#####################################################
+
+#pending update
+@app.route('/create', methods=['POST'])
+def create():
+    data = request.get_json()
+    name = data['name']
+    email = data['email']
+    phone = data['phone']
+    address = data['address']
+    
+    query = f"INSERT INTO users (name, email, phone, address) VALUES ('{name}', '{email}', '{phone}', '{address}')"
+    
+    try:
+        execute_query(conn, query)
+        return jsonify({"message": "User created successfully"}), 201
+    except Error as e:
+        return jsonify({"error": str(e)}), 400
+
+
+
+#####################################################
+#                                                   #
+#                                                   #
+#                  READ FUNCTIONS                   #
+#                                                   #
+#                                                   #
+#####################################################
+
+#pending update
+@app.route('/read', methods=['GET'])
+def read():
+    query = "SELECT * FROM users"
+    
+    try:
+        result = execute_read_query(conn, query)
+        return jsonify(result), 200
+    except Error as e:
+        return jsonify({"error": str(e)}), 400
+
+
+
+#####################################################
+#                                                   #
+#                                                   #
+#                  UPDATE FUNCTIONS                 #
+#                                                   #
+#                                                   #
+#####################################################
+
+#pending update
+@app.route('/update', methods=['PUT'])
+def update():
+    data = request.get_json()
+    user_id = data['id']
+    name = data['name']
+    email = data['email']
+    phone = data['phone']
+    address = data['address']
+    
+    query = f"UPDATE users SET name='{name}', email='{email}', phone='{phone}', address='{address}' WHERE id={user_id}"
+    
+    try:
+        execute_query(conn, query)
+        return jsonify({"message": "User updated successfully"}), 200
+    except Error as e:
+        return jsonify({"error": str(e)}), 400
+
+
+
+#####################################################
+#                                                   #
+#                                                   #
+#               DEACTIVATE FUNCTIONS                #
+#                                                   #
+#                                                   #
+#####################################################
+
+#this is a destructive operation. can be changed to a soft delete by adding an active column to the table and setting it to 0 instead of deleting the record
+
+@app.route('/deactivate', methods=['PUT'])
+def deactivate():
+    data = request.get_json()
+    user_id = data['id']
+    
+    query = f"UPDATE users SET active=0 WHERE id={user_id}"
+    
+    try:
+        execute_query(conn, query)
+        return jsonify({"message": "User deactivated successfully"}), 200
+    except Error as e:
+        return jsonify({"error": str(e)}), 400
+>>>>>>> 9e65def (basic structure of sql queries written)
+>>>>>>> 5d06343 (basic structure of sql queries written)
