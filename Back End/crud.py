@@ -49,6 +49,44 @@ def create():
     except Error as e:
         return jsonify({"error": str(e)}), 400
 
+@app.route('/create_day_off', methods=['POST'])
+def create_day_off():
+    data = request.get_json()
+    staff_id = data['staff_id']
+    slot_start = data['slot_start']
+    slot_end = data['slot_end']
+    is_blocked = data['is_blocked'] 
+    
+    query = f"""INSERT INTO Time_Slot ( 
+
+    staff_id, 
+
+    slot_start, 
+
+    slot_end, 
+
+    is_blocked 
+
+) 
+
+VALUES ( 
+
+    {staff_id}, 
+
+    '{slot_start}', 
+
+    '{slot_end}', 
+
+    {is_blocked} 
+
+); """
+    
+    try:
+        execute_query(conn, query)
+        return jsonify({"message": "User created successfully"}), 201
+    except Error as e:
+        return jsonify({"error": str(e)}), 400
+
 
 
 #####################################################
