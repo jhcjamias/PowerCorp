@@ -6,7 +6,7 @@ const MockCustomerApi = (() => {
   const services = [
     { id: 'workz', name: 'The Workz', description: 'The full service: The OG with Scissor Workz, Eyebrow Detail, and Lineworkz included.', priceCents: 6000, duration: 50 },
     { id: 'regular', name: 'The OG', description: 'A custom service tailored to your style and finished with a clean lineup.', priceCents: 4500, duration: 35 },
-    { id: 'kids', name: 'Kids Cutz 12 & under', description: 'A fresh, age-appropriate finish for clients 12 and under.', priceCents: 4000, duration: 30 },
+    { id: 'kids', name: 'Kids Cutz', description: 'A fresh finish for clients 12 and under.', priceCents: 4000, duration: 30 },
     { id: 'beard', name: 'Lineworkz', description: 'Detailed beard shaping with crisp, defined edges.', priceCents: 3500, duration: 30 }
   ];
   const upgrades = [
@@ -21,7 +21,7 @@ const MockCustomerApi = (() => {
     schedule: { 0: null, 1: null, 2: [660, 1140], 3: [660, 1140], 4: [600, 1170], 5: [540, 1185], 6: [540, 900] },
     hours: [['Monday', 'Closed'], ['Tuesday', '11:00 AM – 7:00 PM'], ['Wednesday', '11:00 AM – 7:00 PM'], ['Thursday', '10:00 AM – 7:30 PM'], ['Friday', '9:00 AM – 7:45 PM'], ['Saturday', '9:00 AM – 3:00 PM'], ['Sunday', 'Closed']]
   };
-  let profile = { name: ' ', email: '', phone: '(832) 555-0100' };
+  let profile = { name: '', email: 'you@example.com', phone: '' };
   let appointments = [{ id: 'DEMO-1001', serviceId: 'regular', serviceName: 'The OG', upgradeIds: [], upgradeNames: [], priceCents: 4500, duration: 35, date: '2026-10-23', time: 660, status: 'completed', paymentMethod: 'shop', customer: { ...profile }, sample: true }];
   let sequence = 2000;
   const copy = value => JSON.parse(JSON.stringify(value));
@@ -175,7 +175,7 @@ const dateLabel = date => dateObject(date).toLocaleDateString('en-US', { weekday
 const shortDate = date => dateObject(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 const timeLabel = minute => `${Math.floor(minute / 60) % 12 || 12}:${String(minute % 60).padStart(2, '0')} ${minute < 720 ? 'AM' : 'PM'}`;
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-const directionsUrl = 'https://www.google.com/maps/dir/?api=1&destination=20260+Katy+Freeway+Suite+116+Katy+TX+77449';
+const directionsUrl = 'https://www.google.com/maps/place/Rolaz+Cutz+Barbershop/@29.7872971,-95.7257288,17z/data=!4m15!1m8!3m7!1s0x8640db716ee7603d:0xb41102f43cb5b554!2sRolaz+Cutz+Barbershop!8m2!3d29.7872971!4d-95.7231539!10e1!16s%2Fg%2F11y8j34g7k!3m5!1s0x8640db716ee7603d:0xb41102f43cb5b554!8m2!3d29.7872971!4d-95.7231539!16s%2Fg%2F11y8j34g7k?entry=ttu&g_ep=EgoyMDI2MTEwOC4wIKXMDSoASAFQAw%3D%3D';
 const mapUrl = 'https://www.openstreetmap.org/export/embed.html?bbox=-95.728%2C29.783%2C-95.718%2C29.791&layer=mapnik&marker=29.7872242%2C-95.7229034';
 function nextDates() {
   const shopDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago' }).format(new Date());
@@ -239,7 +239,7 @@ function upgradeFieldsetView() {
   return `<fieldset class="upgrade-fieldset"><legend>Upgradez</legend><p class="subtext">${upgradeIntro}</p>${upgradeMarkup}</fieldset>`;
 }
 function servicesView() {
-  return bookingLayout('CHOOSE YOUR SERVICE.', 0, `<h2>START HERE.</h2><p class="subtext">Choose one service. Add Upgradez only if you want extra detail.</p><fieldset class="service-fieldset"><legend class="sr-only">Core services</legend><div class="service-list">${state.services.map(service => `<label class="service-choice"><input type="radio" name="service" value="${service.id}" ${state.serviceId === service.id ? 'checked' : ''}><span class="choice-number">${service.duration}M</span><span class="service-copy"><span class="service-name">${esc(service.name)}</span><span class="service-description">${esc(service.description)}</span><span class="service-duration">${service.duration} minutes</span></span><span class="service-price">${money(service.priceCents)}</span></label>`).join('')}</div></fieldset>${upgradeFieldsetView()}<div class="booking-actions"><a class="text-link" href="#home">← Back to the shop</a></div>`, 'services');
+  return bookingLayout('CHOOSE YOUR SERVICE.', 0, `<h2>START HERE.</h2><p class="subtext">Choose one service. Upgradez are if you need extra detail.</p><fieldset class="service-fieldset"><legend class="sr-only">Core services</legend><div class="service-list">${state.services.map(service => `<label class="service-choice"><input type="radio" name="service" value="${service.id}" ${state.serviceId === service.id ? 'checked' : ''}><span class="choice-number">${service.duration}M</span><span class="service-copy"><span class="service-name">${esc(service.name)}</span><span class="service-description">${esc(service.description)}</span><span class="service-duration">${service.duration} minutes</span></span><span class="service-price">${money(service.priceCents)}</span></label>`).join('')}</div></fieldset>${upgradeFieldsetView()}<div class="booking-actions"><a class="text-link" href="#home">← Back to the shop</a></div>`, 'services');
 }
 async function datesView(renderId) {
   const dates = nextDates();
