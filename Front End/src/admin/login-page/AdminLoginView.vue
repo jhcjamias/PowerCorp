@@ -185,9 +185,14 @@ async function onSubmit() {
   color: var(--rc-red);
 }
 
+/* Same bold headline style as the customer site. */
 .brand-name {
   margin: 0;
-  font-size: 26px;
+  font-family: var(--rc-heading);
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   line-height: 1.2;
   color: var(--rc-ink);
 }
@@ -292,7 +297,7 @@ button:focus-visible {
   min-height: 48px;
   border: 0;
   border-radius: 8px;
-  background: var(--rc-red);
+  background: var(--rc-red-dark);
   color: #fff;
   font-size: 16px;
   font-weight: 700;
@@ -300,7 +305,7 @@ button:focus-visible {
 }
 
 .submit:hover:not(:disabled) {
-  background: var(--rc-red-dark);
+  background: #8f001d;
 }
 
 .submit:disabled {

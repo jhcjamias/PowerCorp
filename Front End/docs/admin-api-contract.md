@@ -145,3 +145,58 @@ These three pages are worked out in the browser from data the other sections alr
 Why this matters for the back end: appointments must keep their customer name and phone, and `Completed` must be set reliably (the Completed button does that), because the numbers depend on it.
 If the appointment list gets large, these can move to server-side endpoints later (for example `GET /api/reports?from=&to=` and `GET /api/customers`). Only the files named above would change.
 
+
+## 6. Matching the customer site (added 2026-11-10)
+
+The customer booking site (`Rolaz-Cutz-Customer`) and the admin must read and write the **same data**. These are the agreed rules.
+
+### Same catalog (same ids, names, prices)
+
+| id | Name | Price | Minutes | Type |
+|---|---|---|---|---|
+| `workz` | The Workz (includes every upgrade) | $60 | 50 | service |
+| `regular` | The OG | $45 | 35 | service |
+| `kids` | Kids Cutz 12 & under | $40 | 30 | service |
+| `beard` | Lineworkz | $35 | 30 | service |
+| `scissor-workz` | Scissor Workz | +$5 | 5 | upgrade, for `regular`, `kids` |
+| `eyebrow-detail` | Eyebrow Detail | +$5 | 5 | upgrade, for `regular`, `kids` |
+| `lineworkz` | Lineworkz | +$5 | 5 | upgrade, for `regular` |
+
+- The customer site must **load this list from `GET /api/services`** instead of its hard-coded list, and show only `active: true` items. The owner can hide or change anything in the admin.
+- `kind` is `"service"` or `"upgrade"`. An upgrade has `serviceIds` (the services it can be added to).
+
+### Opening hours and time off
+
+- The customer site must load hours and time off from **`GET /api/schedule`** (section 3) instead of its hard-coded `schedule`. A day with `open: false`, an all-day time-off entry, or a part-day block must not offer those times.
+- Real hours: Tue and Wed 11:00 to 19:00, Thu 10:00 to 19:30, Fri 09:00 to 19:45, Sat 09:00 to 15:00, Sun and Mon closed.
+- Time zone: **America/Chicago** everywhere. Dates are `YYYY-MM-DD` and times are `HH:MM` (24-hour) in shop time.
+
+### Appointment fields (field mapping)
+
+| Meaning | Admin / API | Customer site today |
+|---|---|---|
+| Time | `"14:30"` | minutes after midnight (`870`) |
+| Price | dollars (`45`) | `priceCents` (`4500`) |
+| Length | `services[].durationMin` | `duration` |
+| Service + upgrades | `services: [{ id, name, price, durationMin }, ...]` (service first, then each upgrade) | `serviceId` + `upgradeIds` |
+| Customer | `customer: { name, phone, email }` | `customer: { name, email, phone }` |
+| Payment | `paymentMethod: "Pay at shop" \| "Card"`, `payment: "Paid" \| "Unpaid"` | `paymentMethod: "shop" \| "demo-card"` |
+| Status | `"Booked"`, `"Completed"`, `"No-show"`, `"Cancelled"` | `confirmed`, `completed`, `canceled`, `rescheduled` |
+| Policy | `policyAccepted`, `policyVersion` (stored by the back end) | same |
+
+The **API uses the admin format** (dollars, `HH:MM`, capitalised statuses). The customer site's `fetch` adapter converts at its edge. Appointments keep a copy of the name, price and minutes they were booked with.
+
+### Statuses
+
+- **Booked** (customer `confirmed`), **Completed**, **Cancelled** (customer `canceled`).
+- **No-show** is new. Under the policy a no-show is charged the full price, so it counts as revenue in the admin.
+- **Rescheduling:** the back end should change `date` and `time` on the **same** appointment. If the customer site keeps the old row as `rescheduled` and creates a new one, the admin ignores `Rescheduled` rows so they are not counted as cancellations.
+
+### Policy the admin follows
+
+- Cancel or reschedule at least **2 hours** before the appointment. The admin shows a notice (it does not block) when staff cancel or reschedule inside 2 hours.
+- Arriving more than 5 minutes late may be refused and charged. Staff decide this in person; mark the visit Completed or No-show.
+
+### New endpoint: staff add an appointment
+
+`POST /api/appointments` body `{ date, time, customer: { name, phone, email }, serviceIds: ["regular", "scissor-workz"], paymentMethod, notes }` returns the new appointment (section 2 shape). The **back end must reject** a time outside the opening hours, inside time off, or overlapping another booked appointment. The admin checks the same things first, but the server decides.

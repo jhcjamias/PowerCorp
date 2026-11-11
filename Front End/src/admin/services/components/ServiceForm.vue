@@ -6,6 +6,8 @@ const props = defineProps({
   // the service being edited, or null to add a new one
   service: { type: Object, default: null },
   others: { type: Array, default: () => [] },
+  // the services an upgrade can be added to
+  choices: { type: Array, default: () => [] },
   busy: Boolean,
   error: { type: String, default: '' },
   // (id|null, fields) => Promise<boolean>
@@ -14,12 +16,14 @@ const props = defineProps({
 
 const emit = defineEmits(['done', 'clear-error'])
 
-const fields = reactive({ name: '', price: '', durationMin: '' })
+const fields = reactive({ kind: 'service', name: '', price: '', durationMin: '', serviceIds: [] })
 const errors = ref({})
 const nameInput = ref(null)
 const heading = ref(null)
 
 function fill() {
+  fields.kind = props.service?.kind ?? 'service'
+  fields.serviceIds = [...(props.service?.serviceIds ?? [])]
   fields.name = props.service?.name ?? ''
   fields.price = props.service ? String(props.service.price) : ''
   fields.durationMin = props.service ? String(props.service.durationMin) : ''
@@ -36,7 +40,10 @@ watch(
   },
 )
 
-const title = computed(() => (props.service ? `Edit ${props.service.name}` : 'Add a service'))
+const isUpgrade = computed(() => fields.kind === 'upgrade')
+const title = computed(() =>
+  props.service ? `Edit ${props.service.name}` : isUpgrade.value ? 'Add an upgrade' : 'Add a service',
+)
 const othersForCheck = computed(() => props.others.filter((s) => s.id !== props.service?.id))
 
 async function onSubmit() {
@@ -58,6 +65,14 @@ async function onSubmit() {
 <template>
   <form class="service-form card" novalidate aria-labelledby="service-form-heading" @submit.prevent="onSubmit">
     <h2 id="service-form-heading" ref="heading">{{ title }}</h2>
+
+    <div v-if="!service" class="field">
+      <label for="svc-kind">Type</label>
+      <select id="svc-kind" v-model="fields.kind">
+        <option value="service">Service (a cut or grooming service)</option>
+        <option value="upgrade">Upgrade (an extra added to a service)</option>
+      </select>
+    </div>
 
     <div class="field">
       <label for="svc-name">Name</label>
@@ -104,6 +119,16 @@ async function onSubmit() {
       </div>
     </div>
 
+    <fieldset v-if="isUpgrade" class="works-with" :aria-describedby="errors.serviceIds ? 'svc-works-error' : undefined">
+      <legend>Can be added to</legend>
+      <label v-for="choice in choices" :key="choice.id" class="check">
+        <input v-model="fields.serviceIds" type="checkbox" :value="choice.id" />
+        {{ choice.name }}
+      </label>
+      <p v-if="errors.serviceIds" id="svc-works-error" class="problem">{{ errors.serviceIds }}</p>
+      <p class="hint">The Workz already includes every upgrade.</p>
+    </fieldset>
+
     <p v-if="service" class="hint">
       Changing the price or time doesn’t change appointments that are already booked.
     </p>
@@ -112,7 +137,7 @@ async function onSubmit() {
 
     <div class="buttons">
       <button type="submit" class="primary" :disabled="busy">
-        {{ busy ? 'Saving…' : service ? 'Save changes' : 'Add service' }}
+        {{ busy ? 'Saving…' : service ? 'Save changes' : isUpgrade ? 'Add upgrade' : 'Add service' }}
       </button>
       <button v-if="service" type="button" class="ghost" :disabled="busy" @click="emit('done')">
         Cancel
@@ -122,6 +147,36 @@ async function onSubmit() {
 </template>
 
 <style scoped>
+.works-with {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1.5px solid var(--rc-line);
+  border-radius: 8px;
+}
+
+.works-with legend {
+  padding: 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+}
+
+.check input {
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+  accent-color: var(--rc-ink);
+}
+
 .card {
   display: grid;
   gap: 14px;
@@ -153,7 +208,8 @@ label {
   font-weight: 600;
 }
 
-input {
+input,
+select {
   min-height: 44px;
   padding: 0 12px;
   border: 1.5px solid var(--rc-ink);

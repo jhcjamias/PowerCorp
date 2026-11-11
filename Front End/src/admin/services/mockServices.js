@@ -1,11 +1,11 @@
-// Demo service list. It starts from the same services the demo appointments use,
-// so names and prices match everywhere in the admin.
+// Demo list of services and upgrades. It starts from the same catalog the demo
+// appointments use (which matches the customer site), so names and prices agree everywhere.
 
-import { SERVICES } from '@/admin/appointments/mockAppointments'
+import { SERVICES, UPGRADES } from '@/admin/appointments/mockAppointments'
 
 let store = null
 
 export function getMockServices() {
-  if (!store) store = SERVICES.map((service) => ({ ...service, active: true }))
+  if (!store) store = [...SERVICES, ...UPGRADES].map((item) => ({ ...item, active: true }))
   return store
 }

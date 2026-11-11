@@ -3,10 +3,14 @@
 //
 // REAL MODE assumes these endpoints (change here if your back end differs):
 //   GET   /api/services        -> [service, ...]   (or { services: [...] })
-//   POST  /api/services        body { name, price, durationMin, active } -> the new service
-//   PATCH /api/services/:id    body: any of { name, price, durationMin, active } -> the updated service
+//   POST  /api/services        body { kind, name, price, durationMin, serviceIds?, active } -> the new item
+//   PATCH /api/services/:id    body: any of { name, price, durationMin, serviceIds, active } -> the updated item
 //
-// service: { id: "haircut", name: "Haircut", price: 45, durationMin: 45, active: true }
+// service: { id: "regular", kind: "service", name: "The OG", price: 45, durationMin: 35, active: true }
+// upgrade: { id: "scissor-workz", kind: "upgrade", name: "Scissor Workz", price: 5, durationMin: 5,
+//            serviceIds: ["regular", "kids"], active: true }
+// An upgrade (the customer site calls them "Upgradez") is added on top of a service. serviceIds lists
+// the services it can be added to. The Workz already includes every upgrade, so it is not listed.
 // Services are hidden (active: false) instead of deleted, so old appointments keep their service.
 // An appointment keeps a copy of the name, price and duration it was booked with.
 // Changing a price here must NOT change appointments that already exist.

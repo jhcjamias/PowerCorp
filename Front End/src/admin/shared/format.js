@@ -3,6 +3,26 @@
 
 const pad = (n) => String(n).padStart(2, '0')
 
+// The shop is in Katy, Texas. "Today" and "now" in the admin always mean shop time,
+// the same as the customer site, even if the browser is in another time zone.
+export const SHOP_TIMEZONE = 'America/Chicago'
+
+// A Date whose local fields (year, month, hour...) show the current time at the shop.
+export function shopNow() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: SHOP_TIMEZONE,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+  }).formatToParts(new Date())
+  const v = Object.fromEntries(parts.map((p) => [p.type, Number(p.value)]))
+  return new Date(v.year, v.month - 1, v.day, v.hour, v.minute, v.second)
+}
+
 export function toDateKey(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }

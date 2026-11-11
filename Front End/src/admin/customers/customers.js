@@ -1,13 +1,14 @@
 // Customers are worked out from the appointment list (grouped by phone number),
 // so the page needs no extra endpoint. If the back end later gets a real customers
-// table (with notes, e-mail, etc.), only this file and useCustomers.js need to change.
+// table (with notes, etc.), only this file and useCustomers.js need to change.
+// Total spent includes no-show fees, because a no-show is charged the full price.
 
-import { parseDateTime, phoneDigits } from '@/admin/shared/format'
-import { appointmentTotal } from '@/admin/appointments/utils'
+import { parseDateTime, phoneDigits, shopNow } from '@/admin/shared/format'
+import { appointmentTotal, isBillable } from '@/admin/appointments/utils'
 
 const startTime = (a) => parseDateTime(a.date, a.time).getTime()
 
-export function buildCustomers(appointments, now = Date.now()) {
+export function buildCustomers(appointments, now = shopNow().getTime()) {
   const byPhone = new Map()
   for (const appointment of appointments) {
     const key = phoneDigits(appointment.customer.phone)
@@ -26,9 +27,11 @@ export function buildCustomers(appointments, now = Date.now()) {
       id: phone,
       name: history[0].customer.name, // the most recent name used
       phone,
+      email: history.map((a) => a.customer.email).find(Boolean) ?? '', // the most recent e-mail on file
       visits: completed.length,
+      noShows: history.filter((a) => a.status === 'No-show').length,
       cancelled: history.filter((a) => a.status === 'Cancelled').length,
-      totalSpent: completed.reduce((sum, a) => sum + appointmentTotal(a), 0),
+      totalSpent: history.filter(isBillable).reduce((sum, a) => sum + appointmentTotal(a), 0),
       lastVisit: completed[0] ?? null,
       nextVisit: upcoming[0] ?? null,
       history,

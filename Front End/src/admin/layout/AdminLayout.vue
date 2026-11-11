@@ -189,9 +189,14 @@ watch(isAuthenticated, (signedIn) => {
   border-bottom: 1px solid var(--rc-line);
 }
 
+/* Same bold headline style as the customer site. */
 .page-title {
   margin: 0;
-  font-size: 24px;
+  font-family: var(--rc-heading);
+  font-size: 26px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   line-height: 1.2;
 }
 
@@ -212,7 +217,7 @@ watch(isAuthenticated, (signedIn) => {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: var(--rc-red);
+  background: var(--rc-red-dark);
   color: #fff;
   font-weight: 700;
 }

@@ -47,7 +47,7 @@ function exportCsv() {
 
 <template>
   <div class="page">
-    <p class="intro">How the shop is doing. Revenue counts appointments marked Completed.</p>
+    <p class="intro">How the shop is doing. Revenue counts completed visits and no-show fees.</p>
 
     <form class="filters" aria-label="Report dates" @submit.prevent>
       <div class="field">
@@ -84,8 +84,9 @@ function exportCsv() {
 
     <template v-else-if="report">
       <section class="stats" aria-label="Summary">
-        <StatCard label="Revenue" :value="formatMoney(report.revenue)" hint="Completed appointments" />
+        <StatCard label="Revenue" :value="formatMoney(report.revenue)" hint="Completed visits and no-show fees" />
         <StatCard label="Completed visits" :value="report.completedCount" />
+        <StatCard label="No-shows" :value="report.noShowCount" hint="Charged the full price" />
         <StatCard label="Average per visit" :value="formatMoney(report.average)" />
         <StatCard
           label="Cancelled"

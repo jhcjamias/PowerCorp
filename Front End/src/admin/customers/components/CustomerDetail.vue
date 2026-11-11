@@ -13,6 +13,9 @@ defineProps({
     <template v-if="customer">
       <h2 id="customer-heading">{{ customer.name }}</h2>
       <p class="phone">{{ formatPhoneDisplay(customer.phone) }}</p>
+      <p v-if="customer.email" class="phone">
+        <a :href="`mailto:${customer.email}`">{{ customer.email }}</a>
+      </p>
 
       <dl class="stats">
         <div>
@@ -22,6 +25,10 @@ defineProps({
         <div>
           <dt>Total spent</dt>
           <dd>{{ formatMoney(customer.totalSpent) }}</dd>
+        </div>
+        <div v-if="customer.noShows > 0">
+          <dt>No-shows</dt>
+          <dd>{{ customer.noShows }}</dd>
         </div>
         <div>
           <dt>Last visit</dt>

@@ -9,6 +9,7 @@ const {
   loadError,
   load,
   sorted,
+  serviceChoices,
   items,
   busy,
   actionError,
@@ -36,8 +37,8 @@ function stopEditing() {
 <template>
   <div class="page">
     <p class="intro">
-      The services and prices customers can book. Hide a service to stop new bookings for it
-      without losing past appointments.
+      The services, upgrades and prices customers can book. These are the same choices the
+      customer site shows. Hide one to stop new bookings for it without losing past appointments.
     </p>
 
     <p class="sr-only" role="status" aria-live="polite">{{ statusMessage }}</p>
@@ -59,7 +60,8 @@ function stopEditing() {
             </caption>
             <thead>
               <tr>
-                <th scope="col">Service</th>
+                <th scope="col">Name</th>
+                <th scope="col">Type</th>
                 <th scope="col" class="num">Price</th>
                 <th scope="col" class="num">Time</th>
                 <th scope="col">Shown to customers</th>
@@ -69,17 +71,23 @@ function stopEditing() {
             <tbody>
               <tr v-for="s in sorted" :key="s.id" :class="{ hidden: !s.active, editing: editing?.id === s.id }">
                 <td class="strong">{{ s.name }}</td>
+                <td>
+                  {{ s.kind === 'upgrade' ? 'Upgrade' : 'Service' }}
+                  <small v-if="s.kind === 'upgrade'" class="works">
+                    for {{ (s.serviceIds ?? []).map((id) => items.find((x) => x.id === id)?.name ?? id).join(', ') || 'no service yet' }}
+                  </small>
+                </td>
                 <td class="num">{{ formatMoney(s.price) }}</td>
                 <td class="num">{{ s.durationMin }} min</td>
                 <td>
                   <span class="pill" :class="s.active ? 'on' : 'off'">{{ s.active ? 'Yes' : 'Hidden' }}</span>
                 </td>
                 <td class="actions">
-                  <button type="button" :aria-label="`Edit ${s.name}`" @click="edit(s)">Edit</button>
+                  <button type="button" :aria-label="`Edit ${s.name} (${s.kind === 'upgrade' ? 'upgrade' : 'service'})`" @click="edit(s)">Edit</button>
                   <button
                     type="button"
                     :disabled="busy"
-                    :aria-label="`${s.active ? 'Hide' : 'Show'} ${s.name}`"
+                    :aria-label="`${s.active ? 'Hide' : 'Show'} ${s.name} (${s.kind === 'upgrade' ? 'upgrade' : 'service'})`"
                     @click="setActive(s, !s.active)"
                   >
                     {{ s.active ? 'Hide' : 'Show' }}
@@ -96,6 +104,7 @@ function stopEditing() {
         <ServiceForm
           :service="editing"
           :others="items"
+          :choices="serviceChoices"
           :busy="busy"
           :error="actionError"
           :submit="save"
@@ -160,7 +169,7 @@ function stopEditing() {
 
 table {
   width: 100%;
-  min-width: 520px;
+  min-width: 640px;
   border-collapse: collapse;
   font-size: 15px;
 }
@@ -192,6 +201,12 @@ tr.editing {
 .num {
   text-align: right;
   white-space: nowrap;
+}
+
+.works {
+  display: block;
+  color: var(--rc-muted);
+  font-size: 12px;
 }
 
 .strong {

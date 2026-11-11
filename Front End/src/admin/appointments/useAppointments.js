@@ -2,11 +2,15 @@
 
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { formatTime, parseDateTime, toMinutes } from '@/admin/shared/format'
+import { formatTime, parseDateTime, shopNow, toMinutes } from '@/admin/shared/format'
+import { getSchedule } from '@/admin/schedule/scheduleService'
+import { listServices } from '@/admin/services/servicesService'
 import {
   cancelAppointment,
   completeAppointment,
+  createAppointment,
   listAppointments,
+  noShowAppointment,
   rescheduleAppointment,
 } from './appointmentsService'
 import { appointmentMinutes } from './utils'
@@ -29,7 +33,9 @@ function matchesFilters(appointment, filters) {
   const query = filters.search.trim().toLowerCase()
   if (query) {
     const queryDigits = digitsOnly(query)
-    const nameMatch = appointment.customer.name.toLowerCase().includes(query)
+    const nameMatch =
+      appointment.customer.name.toLowerCase().includes(query) ||
+      String(appointment.customer.email ?? '').toLowerCase().includes(query)
     const phoneMatch =
       queryDigits.length > 0 && digitsOnly(appointment.customer.phone).includes(queryDigits)
     if (!nameMatch && !phoneMatch) return false
@@ -48,8 +54,29 @@ function findConflict(items, id, date, time, minutes) {
   })
 }
 
+// Why a time can't be booked: outside the shop's hours, or inside a time-off block. '' = fine.
+function closedReason(schedule, date, time, minutes) {
+  if (!schedule) return ''
+  const start = toMinutes(time)
+  const end = start + minutes
+  const day = schedule.weeklyHours.find((h) => h.day === parseDateTime(date).getDay())
+  if (!day?.open) return 'The shop is closed that day.'
+  if (start < toMinutes(day.start) || end > toMinutes(day.end)) {
+    return `The shop is open ${formatTime(day.start)} to ${formatTime(day.end)} that day, and this appointment would run outside those hours.`
+  }
+  const off = schedule.timeOff.find((t) => {
+    if (date < t.date || date > t.endDate) return false
+    if (t.allDay) return true
+    return start < toMinutes(t.end) && toMinutes(t.start) < end
+  })
+  if (off) return `That time is blocked off${off.reason ? ` (${off.reason})` : ''}.`
+  return ''
+}
+
 export function useAppointments() {
   const items = ref([])
+  const catalog = ref([]) // services and upgrades the owner currently shows to customers
+  const schedule = ref(null)
   const loading = ref(true)
   const loadError = ref('')
 
@@ -71,6 +98,14 @@ export function useAppointments() {
     loadError.value = ''
     try {
       items.value = await listAppointments()
+      // Only needed by the New appointment form; the list still works if these fail.
+      try {
+        const [all, hours] = await Promise.all([listServices(), getSchedule()])
+        catalog.value = all.filter((s) => s.active)
+        schedule.value = hours
+      } catch {
+        catalog.value = []
+      }
       selectedId.value = sorted.value[0]?.id ?? null // the next appointment
     } catch (error) {
       loadError.value = error?.message || 'Could not load appointments.'
@@ -187,6 +222,52 @@ export function useAppointments() {
     })
   }
 
+  function noShow(id) {
+    actionError.value = ''
+    statusMessage.value = ''
+    return run(async () => {
+      replace(await noShowAppointment(id))
+      statusMessage.value = 'Appointment marked as a no-show. The full price is charged.'
+    })
+  }
+
+  // Staff adding a walk-in or phone booking. fields: see createAppointment().
+  // Returns true when saved; otherwise sets createError.
+  const createError = ref('')
+  async function create(fields) {
+    createError.value = ''
+    statusMessage.value = ''
+    const minutes = fields.services.reduce((sum, s) => sum + s.durationMin, 0)
+    if (parseDateTime(fields.date, fields.time).getTime() < shopNow().getTime()) {
+      createError.value = 'That time has already passed.'
+      return false
+    }
+    const closed = closedReason(schedule.value, fields.date, fields.time, minutes)
+    if (closed) {
+      createError.value = closed
+      return false
+    }
+    const clash = findConflict(items.value, null, fields.date, fields.time, minutes)
+    if (clash) {
+      createError.value = `That overlaps ${clash.customer.name}'s appointment at ${formatTime(clash.time)}.`
+      return false
+    }
+    actionBusy.value = true
+    try {
+      const created = await createAppointment(fields)
+      items.value = [...items.value, created]
+      resetFilters()
+      selectedId.value = created.id
+      statusMessage.value = `Appointment added for ${created.customer.name}.`
+      return true
+    } catch (error) {
+      createError.value = error?.message || 'Could not add the appointment. Please try again.'
+      return false
+    } finally {
+      actionBusy.value = false
+    }
+  }
+
   function reschedule(id, { date, time }) {
     actionError.value = ''
     statusMessage.value = ''
@@ -198,7 +279,7 @@ export function useAppointments() {
       actionError.value = 'Pick a date and a time.'
       return Promise.resolve(false)
     }
-    if (parseDateTime(date, time).getTime() < Date.now()) {
+    if (parseDateTime(date, time).getTime() < shopNow().getTime()) {
       actionError.value = 'That time has already passed.'
       return Promise.resolve(false)
     }
@@ -239,6 +320,10 @@ export function useAppointments() {
     clearActionError,
     cancel,
     complete,
+    noShow,
     reschedule,
+    catalog,
+    create,
+    createError,
   }
 }

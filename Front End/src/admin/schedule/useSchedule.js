@@ -1,7 +1,7 @@
 // State and logic for the Schedule & Time Off page (the components just display it).
 
 import { computed, onMounted, ref } from 'vue'
-import { toDateKey, toMinutes } from '@/admin/shared/format'
+import { shopNow, toDateKey, toMinutes } from '@/admin/shared/format'
 import { listAppointments } from '@/admin/appointments/appointmentsService'
 import { addTimeOff, getSchedule, removeTimeOff, saveWeeklyHours } from './scheduleService'
 import { DAY_ORDER } from './mockSchedule'
@@ -106,7 +106,7 @@ export function useSchedule() {
   }
 
   // ---- time off
-  const today = toDateKey(new Date())
+  const today = toDateKey(shopNow())
 
   // Upcoming and current entries, soonest first. Past entries are hidden.
   const upcomingTimeOff = computed(() =>

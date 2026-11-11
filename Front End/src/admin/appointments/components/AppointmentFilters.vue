@@ -54,6 +54,7 @@ const emit = defineEmits(['update', 'reset'])
         <option value="all">All statuses</option>
         <option value="Booked">Booked</option>
         <option value="Completed">Completed</option>
+        <option value="No-show">No-show</option>
         <option value="Cancelled">Cancelled</option>
       </select>
     </div>

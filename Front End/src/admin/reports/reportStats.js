@@ -1,8 +1,8 @@
 // Report numbers, worked out from the appointment list for a date range.
-// Revenue only counts appointments marked Completed.
+// Revenue counts Completed visits and No-show fees (the full price is charged for a no-show).
 
-import { formatDateShort, parseDateTime, toDateKey } from '@/admin/shared/format'
-import { appointmentTotal } from '@/admin/appointments/utils'
+import { formatDateShort, parseDateTime, shopNow, toDateKey } from '@/admin/shared/format'
+import { appointmentTotal, isBillable } from '@/admin/appointments/utils'
 
 export const PRESETS = [
   { id: '7', label: 'Last 7 days' },
@@ -19,7 +19,7 @@ const addDays = (date, n) => {
   return d
 }
 
-export function presetRange(id, now = new Date()) {
+export function presetRange(id, now = shopNow()) {
   const to = toDateKey(now)
   if (id === '7') return { from: toDateKey(addDays(now, -6)), to }
   if (id === '30') return { from: toDateKey(addDays(now, -29)), to }
@@ -46,7 +46,8 @@ const mondayOf = (dateKey) => {
 
 export function reportFor(appointments, from, to) {
   const inRange = appointments.filter((a) => a.date >= from && a.date <= to)
-  const completed = inRange.filter((a) => a.status === 'Completed')
+  const completed = inRange.filter((a) => isBillable(a))
+  const noShows = inRange.filter((a) => a.status === 'No-show')
   const cancelled = inRange.filter((a) => a.status === 'Cancelled')
   const revenue = completed.reduce((sum, a) => sum + appointmentTotal(a), 0)
 
@@ -86,7 +87,8 @@ export function reportFor(appointments, from, to) {
     inRange,
     weekly,
     revenue,
-    completedCount: completed.length,
+    completedCount: completed.length - noShows.length,
+    noShowCount: noShows.length,
     cancelledCount: cancelled.length,
     cancelRate: inRange.length > 0 ? cancelled.length / inRange.length : 0,
     average: completed.length > 0 ? revenue / completed.length : 0,

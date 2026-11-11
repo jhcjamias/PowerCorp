@@ -8,9 +8,17 @@ export const MAX_PRICE = 1000
 export function validateService(fields, others) {
   const name = fields.name.trim()
   const errors = {}
-  if (!name) errors.name = 'Enter a service name.'
-  else if (others.some((s) => s.name.trim().toLowerCase() === name.toLowerCase())) {
-    errors.name = 'There is already a service with that name.'
+  const label = fields.kind === 'upgrade' ? 'upgrade' : 'service'
+  if (!name) errors.name = `Enter a ${label} name.`
+  else if (
+    others.some(
+      (s) => s.kind === fields.kind && s.name.trim().toLowerCase() === name.toLowerCase(),
+    )
+  ) {
+    errors.name = `There is already a ${label} with that name.`
+  }
+  if (fields.kind === 'upgrade' && fields.serviceIds.length === 0) {
+    errors.serviceIds = 'Pick at least one service this upgrade can be added to.'
   }
 
   const price = Number(fields.price)
@@ -48,12 +56,15 @@ export function useServices() {
   }
   onMounted(load)
 
-  // Active services first, then hidden ones; each group A to Z.
+  // Services first, then upgrades; shown ones before hidden ones; each group A to Z.
+  const rank = (s) => (s.kind === 'upgrade' ? 1 : 0)
   const sorted = computed(() =>
     [...items.value].sort(
-      (a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name),
+      (a, b) =>
+        rank(a) - rank(b) || Number(b.active) - Number(a.active) || a.name.localeCompare(b.name),
     ),
   )
+  const serviceChoices = computed(() => items.value.filter((s) => s.kind !== 'upgrade'))
 
   async function run(task, success) {
     busy.value = true
@@ -71,13 +82,15 @@ export function useServices() {
     }
   }
 
-  // fields: { name, price, durationMin }. Returns true when saved.
+  // fields: { kind, name, price, durationMin, serviceIds }. Returns true when saved.
   function save(id, fields) {
     const clean = {
       name: fields.name.trim(),
       price: Number(fields.price),
       durationMin: Number(fields.durationMin),
     }
+    // An upgrade also remembers which services it can be added to.
+    if (fields.kind === 'upgrade') clean.serviceIds = [...fields.serviceIds]
     if (id) {
       return run(async () => {
         const updated = await updateService(id, clean)
@@ -85,7 +98,7 @@ export function useServices() {
       }, `${clean.name} updated.`)
     }
     return run(async () => {
-      const created = await createService({ ...clean, active: true })
+      const created = await createService({ ...clean, kind: fields.kind ?? 'service', active: true })
       items.value = [...items.value, created]
     }, `${clean.name} added.`)
   }
@@ -106,6 +119,7 @@ export function useServices() {
     loadError,
     load,
     sorted,
+    serviceChoices,
     items,
     busy,
     actionError,
