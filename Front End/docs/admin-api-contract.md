@@ -115,6 +115,33 @@ Other statuses: `404` if the id doesn't exist.
 - Adding time off does **not** cancel appointments that already exist in that window. The admin page only warns about them (it compares against the appointment list) and Rolaz handles each one on the Appointments page.
 - Validate: `end` after `start`; `endDate` not before `date`; times as `HH:MM`.
 
-## Coming later (will be added here as each page is built)
-Services and prices, customers, dashboard numbers, reports.
-Services and prices should be the single list that both the admin and the customer booking page read.
+## 4. Services and prices (file: `src/admin/services/servicesService.js`)
+
+```json
+{ "id": "haircut", "name": "Haircut", "price": 45, "durationMin": 45, "active": true }
+```
+
+| Call | Body | Response |
+|---|---|---|
+| `GET /api/services` | none | array of services (or `{ "services": [...] }`) |
+| `POST /api/services` | `{ name, price, durationMin, active }` | `201` the new service (with its `id`) |
+| `PATCH /api/services/:id` | any of `name`, `price`, `durationMin`, `active` | the updated service |
+
+- There is no delete. A service is hidden with `active: false`, so old appointments keep their service.
+- `active: false` services must not be offered on the customer booking page.
+- An appointment stores its own copy of the name, price and duration it was booked with (see section 2).
+  Changing a price here must **not** change appointments that already exist.
+- This should be the one list that the customer booking page reads too.
+- Validation the admin applies (repeat it on the server): name required and unique (ignoring case), price from 0 to 1000, `durationMin` a whole number from 5 to 480.
+
+## 5. Dashboard, Customers and Reports (no new endpoints)
+
+These three pages are worked out in the browser from data the other sections already return:
+
+- **Dashboard:** `GET /api/appointments` and `GET /api/schedule`.
+- **Customers:** `GET /api/appointments`, grouped by the customer's phone number (name, visits, last visit, next appointment, total spent).
+- **Reports:** `GET /api/appointments`. Revenue counts appointments with status `Completed` only. "Download CSV" is built in the browser.
+
+Why this matters for the back end: appointments must keep their customer name and phone, and `Completed` must be set reliably (the Completed button does that), because the numbers depend on it.
+If the appointment list gets large, these can move to server-side endpoints later (for example `GET /api/reports?from=&to=` and `GET /api/customers`). Only the files named above would change.
+

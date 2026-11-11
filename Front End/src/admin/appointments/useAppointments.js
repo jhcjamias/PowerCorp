@@ -1,6 +1,7 @@
 // All the state and logic for the Appointments page (the components just display it).
 
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { formatTime, parseDateTime, toMinutes } from '@/admin/shared/format'
 import {
   cancelAppointment,
@@ -52,7 +53,11 @@ export function useAppointments() {
   const loading = ref(true)
   const loadError = ref('')
 
-  const filters = reactive({ ...DEFAULT_FILTERS })
+  // The Customers page links here with ?search=<phone> to show one customer's appointments.
+  const route = useRoute()
+  const initialSearch = typeof route.query.search === 'string' ? route.query.search : ''
+
+  const filters = reactive({ ...DEFAULT_FILTERS, search: initialSearch })
   const page = ref(1)
   const selectedId = ref(null)
 
