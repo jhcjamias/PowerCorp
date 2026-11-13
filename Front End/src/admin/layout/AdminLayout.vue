@@ -2,6 +2,7 @@
 import { computed, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { useAuth } from '@/admin/login-page/useAuth'
+import logoUrl from '@/assets/rolaz-logo.png'
 
 const route = useRoute()
 const router = useRouter()
@@ -29,7 +30,7 @@ watch(isAuthenticated, (signedIn) => {
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
-        <span class="brand-mark" aria-hidden="true">R</span>
+        <span class="brand-mark"><img :src="logoUrl" alt="" width="42" height="42" /></span>
         <div>
           <p class="brand-name">Rolaz Cutz</p>
           <p class="brand-sub">Admin</p>
@@ -91,13 +92,16 @@ watch(isAuthenticated, (signedIn) => {
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: 52px;
+  height: 52px;
   border-radius: 8px;
   background: #fff;
-  color: var(--rc-ink);
-  font-size: 20px;
-  font-weight: 700;
+}
+
+.brand-mark img {
+  display: block;
+  width: 42px;
+  height: 42px;
 }
 
 .brand-name {
@@ -185,9 +189,14 @@ watch(isAuthenticated, (signedIn) => {
   border-bottom: 1px solid var(--rc-line);
 }
 
+/* Same bold headline style as the customer site. */
 .page-title {
   margin: 0;
-  font-size: 24px;
+  font-family: var(--rc-heading);
+  font-size: 26px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   line-height: 1.2;
 }
 
@@ -208,7 +217,7 @@ watch(isAuthenticated, (signedIn) => {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: var(--rc-red);
+  background: var(--rc-red-dark);
   color: #fff;
   font-weight: 700;
 }

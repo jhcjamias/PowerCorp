@@ -6,7 +6,7 @@ import StatusBadge from '@/admin/appointments/components/StatusBadge.vue'
 import { serviceNames } from '@/admin/appointments/utils'
 import { getSchedule } from '@/admin/schedule/scheduleService'
 import StatCard from '@/admin/shared/components/StatCard.vue'
-import { formatDateShort, formatMoney, formatTime } from '@/admin/shared/format'
+import { formatDateShort, formatMoney, formatTime, shopNow } from '@/admin/shared/format'
 import { dashboardStats } from './dashboardStats'
 
 const { user } = useAuth()
@@ -34,7 +34,7 @@ onMounted(load)
 const stats = computed(() => dashboardStats(appointments.value))
 
 const greeting = computed(() => {
-  const hour = new Date().getHours()
+  const hour = shopNow().getHours()
   const part = hour < 12 ? 'morning' : hour < 18 ? 'afternoon' : 'evening'
   return `Good ${part}${user.value?.name ? `, ${user.value.name}` : ''}`
 })
@@ -45,7 +45,7 @@ const todayNote = computed(() => {
   const today = stats.value.today
   const off = schedule.value.timeOff.find((t) => t.date <= today && t.endDate >= today)
   if (off?.allDay) return `Closed today${off.reason ? ` (${off.reason})` : ''}.`
-  const day = schedule.value.weeklyHours.find((h) => h.day === new Date().getDay())
+  const day = schedule.value.weeklyHours.find((h) => h.day === shopNow().getDay())
   if (!day?.open) return 'The shop is closed today.'
   const partOff = off ? ` Blocked ${formatTime(off.start)} to ${formatTime(off.end)}${off.reason ? ` (${off.reason})` : ''}.` : ''
   return `Open ${formatTime(day.start)} to ${formatTime(day.end)}.${partOff}`
@@ -81,7 +81,7 @@ const nextTimeOff = computed(() => {
           :hint="stats.nextUp ? `Next: ${stats.nextUp.customer.name}, ${formatDateShort(stats.nextUp.date)} at ${formatTime(stats.nextUp.time)}` : 'Nothing coming up'"
         />
         <StatCard label="Booked this week" :value="stats.bookedThisWeek" hint="Next 7 days" />
-        <StatCard label="Revenue, last 7 days" :value="formatMoney(stats.revenueLast7)" hint="Completed appointments" />
+        <StatCard label="Revenue, last 7 days" :value="formatMoney(stats.revenueLast7)" hint="Completed visits and no-show fees" />
         <StatCard label="Cancellations, last 30 days" :value="stats.cancelledLast30" />
       </section>
 
