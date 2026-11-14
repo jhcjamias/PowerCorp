@@ -30,6 +30,13 @@ defineProps({
   color: var(--rc-ink);
 }
 
+.badge-no-show {
+  border-style: dashed;
+  border-color: var(--rc-red);
+  background: #fff;
+  color: var(--rc-red-dark);
+}
+
 .badge-cancelled {
   border-color: var(--rc-red);
   background: var(--rc-error-bg);

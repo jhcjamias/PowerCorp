@@ -2,6 +2,7 @@
 import { nextTick, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '@/admin/login-page/useAuth'
+import logoUrl from '@/assets/rolaz-logo.png'
 import { MOCK_CREDENTIALS, USE_MOCK_AUTH } from '@/admin/login-page/authService'
 import { formatPhone, validatePassword, validatePhone } from '@/admin/login-page/validators'
 
@@ -73,7 +74,7 @@ async function onSubmit() {
   <main class="login-page">
     <section class="login-card" aria-labelledby="login-title">
       <header class="brand">
-        <span class="brand-mark" aria-hidden="true">R</span>
+        <img class="brand-mark" :src="logoUrl" alt="" width="76" height="76" />
         <div>
           <p class="brand-eyebrow">Admin</p>
           <h1 id="login-title" class="brand-name">Rolaz Cutz</h1>
@@ -170,15 +171,9 @@ async function onSubmit() {
 }
 
 .brand-mark {
-  display: grid;
-  place-items: center;
-  width: 52px;
-  height: 52px;
-  border-radius: 10px;
-  background: var(--rc-ink);
-  color: #fff;
-  font-size: 26px;
-  font-weight: 700;
+  width: 76px;
+  height: 76px;
+  object-fit: contain;
 }
 
 .brand-eyebrow {
@@ -190,9 +185,14 @@ async function onSubmit() {
   color: var(--rc-red);
 }
 
+/* Same bold headline style as the customer site. */
 .brand-name {
   margin: 0;
-  font-size: 26px;
+  font-family: var(--rc-heading);
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   line-height: 1.2;
   color: var(--rc-ink);
 }
@@ -297,7 +297,7 @@ button:focus-visible {
   min-height: 48px;
   border: 0;
   border-radius: 8px;
-  background: var(--rc-red);
+  background: var(--rc-red-dark);
   color: #fff;
   font-size: 16px;
   font-weight: 700;
@@ -305,7 +305,7 @@ button:focus-visible {
 }
 
 .submit:hover:not(:disabled) {
-  background: var(--rc-red-dark);
+  background: #8f001d;
 }
 
 .submit:disabled {
