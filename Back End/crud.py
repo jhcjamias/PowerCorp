@@ -1634,7 +1634,7 @@ def instagram_token():
 def load_instagram_posts():
     unavailable = {
         "status": "unavailable",
-        "profileUrl": INSTAGRAM_PROFILE_URL,
+        "profileUrl": "https://www.instagram.com/rolaz_cutz/",
         "posts": [],
         "message": "Live Instagram posts are temporarily unavailable.",
     }
@@ -1662,7 +1662,7 @@ def load_instagram_posts():
         "caption": item.get("caption", ""),
         "timestamp": item.get("timestamp", ""),
     } for item in media.get("data", [])]
-    return {"status": "success", "profileUrl": INSTAGRAM_PROFILE_URL, "posts": posts}, True
+    return {"status": "success", "profileUrl": "https://www.instagram.com/rolaz_cutz/", "posts": posts}, True
 
 
 @app.route("/api/public/instagram", methods=["GET"])
