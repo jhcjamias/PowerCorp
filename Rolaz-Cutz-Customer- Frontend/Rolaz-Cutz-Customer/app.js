@@ -1,129 +1,122 @@
 'use strict';
 
-// Replace this adapter with an HTTP implementation that preserves its Promise contract.
-// All data lives only in memory. No card fields, network requests, or browser storage.
-const MockCustomerApi = (() => {
-  const services = [
-    { id: 'workz', name: 'The Workz', description: 'The full service: The OG with Scissor Workz, Eyebrow Detail, and Lineworkz included.', priceCents: 6000, duration: 50 },
-    { id: 'regular', name: 'The OG', description: 'A custom service tailored to your style and finished with a clean lineup.', priceCents: 4500, duration: 35 },
-    { id: 'kids', name: 'Kids Cutz', description: 'A fresh finish for clients 12 and under.', priceCents: 4000, duration: 30 },
-    { id: 'beard', name: 'Lineworkz', description: 'Detailed beard shaping with crisp, defined edges.', priceCents: 3500, duration: 30 }
-  ];
-  const upgrades = [
-    { id: 'scissor-workz', name: 'Scissor Workz', description: 'Added scissor detailing for shape, texture, and a natural finish.', priceCents: 500, duration: 5, serviceIds: ['regular', 'kids'] },
-    { id: 'eyebrow-detail', name: 'Eyebrow Detail', description: 'A clean eyebrow finish for a sharper overall look.', priceCents: 500, duration: 5, serviceIds: ['regular', 'kids'] },
-    { id: 'lineworkz', name: 'Lineworkz', description: 'Add detailed beard shaping and a crisp line-up.', priceCents: 500, duration: 5, serviceIds: ['regular'] }
-  ];
-  const business = {
-    name: 'Rolaz Cutz Barbershop', address: '20260 Katy Freeway Suite #116, Katy, TX 77449',
-    phone: '+1 832-874-8680', email: 'rolazcutz@gmail.com', timezone: 'America/Chicago',
-    // Opening / closing times in local shop minutes; 0 = Sunday.
-    schedule: { 0: null, 1: null, 2: [660, 1140], 3: [660, 1140], 4: [600, 1170], 5: [540, 1185], 6: [540, 900] },
-    hours: [['Monday', 'Closed'], ['Tuesday', '11:00 AM – 7:00 PM'], ['Wednesday', '11:00 AM – 7:00 PM'], ['Thursday', '10:00 AM – 7:30 PM'], ['Friday', '9:00 AM – 7:45 PM'], ['Saturday', '9:00 AM – 3:00 PM'], ['Sunday', 'Closed']]
-  };
-  let profile = { name: '', email: 'you@example.com', phone: '' };
-  let appointments = [{ id: 'DEMO-1001', serviceId: 'regular', serviceName: 'The OG', upgradeIds: [], upgradeNames: [], priceCents: 4500, duration: 35, date: '2026-10-23', time: 660, status: 'completed', paymentMethod: 'shop', customer: { ...profile }, sample: true }];
-  let sequence = 2000;
-  const copy = value => JSON.parse(JSON.stringify(value));
-  const result = value => new Promise(resolve => setTimeout(() => resolve(copy(value)), 90));
-  const parseDate = date => {
-    if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
-    const [year, month, day] = date.split('-').map(Number);
-    const parsed = new Date(year, month - 1, day, 12);
-    return parsed.getFullYear() === year && parsed.getMonth() === month - 1 && parsed.getDate() === day ? parsed : null;
-  };
-  const requireDate = date => {
-    const parsed = parseDate(date);
-    if (!parsed) throw new Error('Please choose a valid appointment date.');
-    return parsed;
-  };
-  const normalizeCustomer = customer => {
-    if (!customer?.name?.trim() || !customer.email?.includes('@') || !customer.phone?.trim()) throw new Error('Please complete your contact details.');
-    return { name: customer.name.trim(), email: customer.email.trim(), phone: customer.phone.trim() };
-  };
-  const quoteFor = ({ serviceId, upgradeIds = [] }) => {
-    const service = services.find(item => item.id === serviceId);
-    if (!service) throw new Error('Please choose a service.');
-    if (!Array.isArray(upgradeIds)) throw new Error('Please choose valid Upgradez.');
-    const uniqueIds = [...new Set(upgradeIds)];
-    if (uniqueIds.length !== upgradeIds.length) throw new Error('Each upgrade can be selected only once.');
-    const selectedUpgrades = uniqueIds.map(id => upgrades.find(item => item.id === id));
-    if (selectedUpgrades.some(item => !item)) throw new Error('One or more selected Upgradez are unavailable.');
-    if (selectedUpgrades.some(item => !item.serviceIds.includes(service.id))) throw new Error('That upgrade is not available with this service.');
-    return {
-      service,
-      upgrades: selectedUpgrades,
-      upgradeIds: selectedUpgrades.map(item => item.id),
-      priceCents: service.priceCents + selectedUpgrades.reduce((total, item) => total + item.priceCents, 0),
-      duration: service.duration + selectedUpgrades.reduce((total, item) => total + item.duration, 0)
-    };
-  };
-  const slotsFor = ({ date, serviceId, upgradeIds = [], replacesId }) => {
-    const quote = quoteFor({ serviceId, upgradeIds });
-    const hours = business.schedule[requireDate(date).getDay()];
-    if (!hours) return [];
-    const slots = [];
-    for (let minute = hours[0]; minute + quote.duration <= hours[1]; minute += 15) {
-      const demoBusy = [[hours[0] + 60, hours[0] + 105], [hours[0] + 180, hours[0] + 225]];
-      const booked = appointments.filter(item => item.date === date && item.status === 'confirmed' && item.id !== replacesId).map(item => [item.time, item.time + (item.duration ?? quoteFor(item).duration)]);
-      const unavailable = [...demoBusy, ...booked].some(([start, end]) => minute < end && minute + quote.duration > start);
-      slots.push({ time: minute, available: !unavailable });
+// Rolaz Cutz customer site -> Flask back end (Back End/crud.py).
+// Same Promise contract the old in-memory demo adapter had, but every call is a real HTTP request,
+// so a booking made here is saved in the database and shows up in the admin Appointments page.
+//
+// API address: change API_BASE when the back end is hosted somewhere other than your computer.
+const API_BASE = window.ROLAZ_API_URL || 'http://127.0.0.1:5000';
+// Must match POLICY_VERSION in the back end (Back End/crud.py, default "2026-11-11").
+const POLICY_VERSION = '2026-11-11';
+const STORE_KEY = 'rolazcutz.myAppointments.v1';
+
+const CustomerApi = (() => {
+  let catalog = { services: [], upgrades: [] };
+
+  // The back end has no "list my guest bookings" route, so this browser remembers the bookings it made
+  // (including the one-time guestToken the server returns) and uses them for My Appointments / cancel / reschedule.
+  const loadStore = () => { try { return JSON.parse(localStorage.getItem(STORE_KEY)) || { profile: null, appointments: [] }; } catch { return { profile: null, appointments: [] }; } };
+  const saveStore = store => { try { localStorage.setItem(STORE_KEY, JSON.stringify(store)); } catch { /* private mode: keep working without storage */ } };
+
+  async function http(path, { method = 'GET', body } = {}) {
+    let response;
+    try {
+      response = await fetch(API_BASE + path, {
+        method,
+        credentials: 'include',
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined
+      });
+    } catch {
+      throw new Error('We could not reach the booking server. Please try again, or call the shop.');
     }
-    return slots;
-  };
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || 'Something went wrong. Please try again.');
+    return data;
+  }
+
+  const toMinutes = hhmm => { const [h, m] = String(hhmm).split(':').map(Number); return h * 60 + m; };
+  const toHHMM = minute => `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+  const STATUS = { Booked: 'confirmed', Cancelled: 'canceled', Completed: 'completed', 'No-show': 'no-show' };
+
+  // Server appointment (admin shape) -> the shape the booking pages already render.
+  function toCustomerShape(api, guestToken) {
+    const upgradeIds = new Set(catalog.upgrades.map(item => item.id));
+    const main = api.services.find(line => !upgradeIds.has(line.id)) ?? api.services[0];
+    const extras = api.services.filter(line => line !== main);
+    const cents = line => Math.round(Number(line.price) * 100);
+    return {
+      id: api.id,
+      serviceId: main.id,
+      serviceName: main.name,
+      upgradeIds: extras.map(line => line.id),
+      upgradeNames: extras.map(line => line.name),
+      priceCents: api.services.reduce((total, line) => total + cents(line), 0),
+      duration: api.services.reduce((total, line) => total + line.durationMin, 0),
+      date: api.date,
+      time: toMinutes(api.time),
+      customer: api.customer,
+      paymentMethod: api.paymentMethod,
+      policyAccepted: api.policyAccepted,
+      policyVersion: api.policyVersion,
+      status: STATUS[api.status] ?? 'confirmed',
+      guestToken
+    };
+  }
+
+  function remember(appointment) {
+    const store = loadStore();
+    store.appointments = [appointment, ...store.appointments.filter(item => item.id !== appointment.id)];
+    saveStore(store);
+  }
+
+  const servicesBody = request => [{ id: request.serviceId }, ...(request.upgradeIds ?? []).map(id => ({ id }))];
+
   return {
-    getServices: () => result(services),
-    getUpgrades: () => result(upgrades),
-    getBusiness: () => result(business),
-    getProfile: () => result(profile),
+    getServices: async () => (catalog.services = await http('/api/public/services')),
+    getUpgrades: async () => (catalog.upgrades = await http('/api/public/upgrades')),
+    getBusiness: () => http('/api/public/business'),
+    getProfile: async () => loadStore().profile ?? { name: '', email: '', phone: '' },
     updateProfile: async customer => {
-      profile = normalizeCustomer(customer);
-      return result(profile);
+      if (!customer?.name?.trim() || !customer.email?.includes('@') || !customer.phone?.trim()) throw new Error('Please complete your contact details.');
+      const store = loadStore();
+      store.profile = { name: customer.name.trim(), email: customer.email.trim(), phone: customer.phone.trim() };
+      saveStore(store);
+      return store.profile;
     },
-    getAvailability: async request => result({ date: request.date, timezone: business.timezone, slots: slotsFor(request) }),
-    listAppointments: () => result(appointments),
+    getAvailability: request => {
+      const query = new URLSearchParams({ date: request.date, serviceId: request.serviceId });
+      if (request.upgradeIds?.length) query.set('upgradeIds', request.upgradeIds.join(','));
+      if (request.replacesId) query.set('replacesId', request.replacesId);
+      return http(`/api/public/availability?${query}`);
+    },
+    listAppointments: async () => loadStore().appointments,
     createAppointment: async request => {
-      const quote = quoteFor(request);
-      const date = requireDate(request.date);
-      const currentDate = new Intl.DateTimeFormat('en-CA', { timeZone: business.timezone }).format(new Date());
-      if (!Number.isFinite(date.getTime()) || request.date <= currentDate) throw new Error('Please choose a future appointment date.');
-      if (!['demo-card', 'shop'].includes(request.paymentMethod)) throw new Error('Please choose a demo payment option.');
       if (request.policyAccepted !== true) throw new Error('Please accept the Appointment & Payment Policy.');
-      const previous = request.replacesId ? appointments.find(item => item.id === request.replacesId && item.status === 'confirmed') : null;
-      if (request.replacesId && !previous) throw new Error('That demo appointment can no longer be rescheduled.');
-      if (!slotsFor(request).some(slot => slot.time === request.time && slot.available)) throw new Error('That demo time is unavailable. Please choose another time.');
-      const customer = normalizeCustomer(request.customer);
-      profile = customer;
-      if (previous) previous.status = 'rescheduled';
-      const appointment = {
-        id: `DEMO-${++sequence}`,
-        serviceId: quote.service.id,
-        serviceName: quote.service.name,
-        upgradeIds: quote.upgradeIds,
-        upgradeNames: quote.upgrades.map(item => item.name),
-        priceCents: quote.priceCents,
-        duration: quote.duration,
-        date: request.date,
-        time: request.time,
-        customer,
-        paymentMethod: request.paymentMethod,
-        policyAccepted: true,
-        policyVersion: '2026-11-05',
-        status: 'confirmed',
-        sample: false
-      };
-      appointments.unshift(appointment);
-      return result(appointment);
+      if (request.paymentMethod !== 'shop') throw new Error('Online payment is not available yet. Please choose Pay at the Shop.');
+      const customer = await CustomerApi.updateProfile(request.customer);
+      const common = { date: request.date, time: toHHMM(request.time), services: servicesBody(request), policyAccepted: true, policyVersion: POLICY_VERSION };
+      let saved;
+      if (request.replacesId) {
+        // Moving a booking keeps its ID; the guestToken proves this browser made it.
+        const previous = loadStore().appointments.find(item => item.id === request.replacesId);
+        saved = toCustomerShape(await http(`/api/customer/appointments/${request.replacesId}`, { method: 'PATCH', body: { ...common, guestToken: previous?.guestToken } }), previous?.guestToken);
+      } else {
+        const created = await http('/api/customer/appointments', { method: 'POST', body: { ...common, customer, status: 'Booked', payment: 'Pay at Shop', paymentMethod: 'shop' } });
+        saved = toCustomerShape(created, created.guestToken);
+      }
+      remember(saved);
+      return saved;
     },
     cancelAppointment: async ({ id }) => {
-      const appointment = appointments.find(item => item.id === id && item.status === 'confirmed');
-      if (!appointment) throw new Error('This appointment cannot be canceled.');
-      appointment.status = 'canceled';
-      return result(appointment);
+      const previous = loadStore().appointments.find(item => item.id === id);
+      const saved = toCustomerShape(await http(`/api/customer/appointments/${id}`, { method: 'PATCH', body: { status: 'Cancelled', guestToken: previous?.guestToken } }), previous?.guestToken);
+      remember(saved);
+      return saved;
     }
   };
 })();
-window.MockCustomerApi = MockCustomerApi;
+window.CustomerApi = CustomerApi;
 
 const state = { services: [], upgrades: [], business: null, profile: null, serviceId: null, upgradeIds: [], date: null, time: null, replacesId: null, confirmation: null, renderId: 0 };
 const main = document.querySelector('#main');
@@ -217,10 +210,10 @@ function stepper(index) {
 function summaryView(step) {
   const quote = selectionQuote();
   const ready = quote && (step === 'services' || state.date && state.time !== null);
-  return `<div class="slip-label">YOUR APPOINTMENT</div><h3>${quote ? esc(quote.service.name) : 'CHOOSE A SERVICE'}</h3><p>${quote ? `${quote.duration} minutes at Rolaz Cutz` : 'Your time and total will appear here.'}</p>${quote?.upgrades.length ? `<div class="summary-detail">Upgradez<small>${quote.upgrades.map(item => esc(item.name)).join(' · ')}</small></div>` : ''}<div class="summary-detail">Rolaz Cutz Barbershop<small>20260 Katy Freeway, Suite 116<br>Katy, TX 77449</small></div>${state.date ? `<div class="summary-detail">${dateLabel(state.date)}<small>${state.time !== null ? timeLabel(state.time) : 'Choose a time'} · Central time</small></div>` : ''}<div class="summary-total"><span>Estimated total</span><strong>${quote ? money(quote.priceCents) : '—'}</strong></div>${step === 'review' ? `<button class="button button-full" type="submit" form="checkout-form">Confirm demo appointment</button>` : `<button class="button button-full" data-action="next" ${ready ? '' : 'disabled'}>Continue →</button>`}<p class="fine-print">Approval prototype. Availability is simulated. No real appointment or payment will be made.</p>`;
+  return `<div class="slip-label">YOUR APPOINTMENT</div><h3>${quote ? esc(quote.service.name) : 'CHOOSE A SERVICE'}</h3><p>${quote ? `${quote.duration} minutes at Rolaz Cutz` : 'Your time and total will appear here.'}</p>${quote?.upgrades.length ? `<div class="summary-detail">Upgradez<small>${quote.upgrades.map(item => esc(item.name)).join(' · ')}</small></div>` : ''}<div class="summary-detail">Rolaz Cutz Barbershop<small>20260 Katy Freeway, Suite 116<br>Katy, TX 77449</small></div>${state.date ? `<div class="summary-detail">${dateLabel(state.date)}<small>${state.time !== null ? timeLabel(state.time) : 'Choose a time'} · Central time</small></div>` : ''}<div class="summary-total"><span>Estimated total</span><strong>${quote ? money(quote.priceCents) : '—'}</strong></div>${step === 'review' ? `<button class="button button-full" type="submit" form="checkout-form">Confirm appointment</button>` : `<button class="button button-full" data-action="next" ${ready ? '' : 'disabled'}>Continue →</button>`}<p class="fine-print">No payment is taken online. Pay at the shop after your service.</p>`;
 }
 function bookingLayout(title, index, content, step) {
-  return `<div class="shell booking-shell"><div class="booking-header"><span class="section-code">${state.replacesId ? 'RESCHEDULE DEMO APPOINTMENT' : `BOOKING / STEP ${index + 1} OF 4`}</span><h1>${title}</h1></div>${stepper(index)}<div class="booking-grid"><section class="booking-content" aria-label="${title}">${content}</section><aside class="summary" id="booking-summary" aria-label="Appointment summary">${summaryView(step)}</aside></div></div>`;
+  return `<div class="shell booking-shell"><div class="booking-header"><span class="section-code">${state.replacesId ? 'RESCHEDULE APPOINTMENT' : `BOOKING / STEP ${index + 1} OF 4`}</span><h1>${title}</h1></div>${stepper(index)}<div class="booking-grid"><section class="booking-content" aria-label="${title}">${content}</section><aside class="summary" id="booking-summary" aria-label="Appointment summary">${summaryView(step)}</aside></div></div>`;
 }
 function upgradeFieldsetView() {
   const availableUpgrades = state.serviceId ? state.upgrades.filter(upgrade => upgrade.serviceIds.includes(state.serviceId)) : state.upgrades;
@@ -245,10 +238,10 @@ async function datesView(renderId) {
   const dates = nextDates();
   if (!state.date || !dates.includes(state.date)) state.date = dates.find(date => state.business.schedule[dateObject(date).getDay()]);
   const requestedDate = state.date;
-  const availability = await MockCustomerApi.getAvailability({ date: requestedDate, serviceId: state.serviceId, upgradeIds: state.upgradeIds, replacesId: state.replacesId });
+  const availability = await CustomerApi.getAvailability({ date: requestedDate, serviceId: state.serviceId, upgradeIds: state.upgradeIds, replacesId: state.replacesId });
   if (renderId !== state.renderId || state.date !== requestedDate) return null;
   if (!availability.slots.some(slot => slot.time === state.time && slot.available)) state.time = null;
-  return bookingLayout('CHOOSE A DATE & TIME.', 1, `<h2>PICK A TIME.</h2><p class="subtext">Choose a date and time below. All times are shown in Central time.</p><div class="date-grid" role="group" aria-label="Choose appointment date">${dates.map(date => { const day = dateObject(date); const closed = !state.business.schedule[day.getDay()]; return `<button class="date-button" data-date="${date}" aria-label="${dateLabel(date)}${closed ? ', shop closed' : ''}" aria-pressed="${date === state.date}" ${closed ? 'disabled' : ''}><span>${day.toLocaleDateString('en-US', { weekday: 'short' })}</span><strong>${day.getDate()}</strong><small>${closed ? 'CLOSED' : day.toLocaleDateString('en-US', { month: 'short' }).toUpperCase()}</small></button>`; }).join('')}</div><div class="slot-heading"><h3>${dateLabel(state.date)}</h3><span>DEMO AVAILABILITY / ${selectionQuote().duration} MIN</span></div><div class="time-grid" role="group" aria-label="Choose appointment time">${availability.slots.map(slot => `<button class="time-button" data-time="${slot.time}" aria-pressed="${state.time === slot.time}" ${slot.available ? '' : 'disabled'} aria-label="${timeLabel(slot.time)}${slot.available ? '' : ', unavailable'}">${timeLabel(slot.time)}</button>`).join('')}</div><div class="notice">Unavailable times are crossed out. Final availability will come from the future booking backend.</div><div class="booking-actions"><a class="text-link" href="#services">← Change service or Upgradez</a></div>`, 'dates');
+  return bookingLayout('CHOOSE A DATE & TIME.', 1, `<h2>PICK A TIME.</h2><p class="subtext">Choose a date and time below. All times are shown in Central time.</p><div class="date-grid" role="group" aria-label="Choose appointment date">${dates.map(date => { const day = dateObject(date); const closed = !state.business.schedule[day.getDay()]; return `<button class="date-button" data-date="${date}" aria-label="${dateLabel(date)}${closed ? ', shop closed' : ''}" aria-pressed="${date === state.date}" ${closed ? 'disabled' : ''}><span>${day.toLocaleDateString('en-US', { weekday: 'short' })}</span><strong>${day.getDate()}</strong><small>${closed ? 'CLOSED' : day.toLocaleDateString('en-US', { month: 'short' }).toUpperCase()}</small></button>`; }).join('')}</div><div class="slot-heading"><h3>${dateLabel(state.date)}</h3><span>OPEN TIMES / ${selectionQuote().duration} MIN</span></div><div class="time-grid" role="group" aria-label="Choose appointment time">${availability.slots.map(slot => `<button class="time-button" data-time="${slot.time}" aria-pressed="${state.time === slot.time}" ${slot.available ? '' : 'disabled'} aria-label="${timeLabel(slot.time)}${slot.available ? '' : ', unavailable'}">${timeLabel(slot.time)}</button>`).join('')}</div><div class="notice">Unavailable times are crossed out. Final availability will come from the future booking backend.</div><div class="booking-actions"><a class="text-link" href="#services">← Change service or Upgradez</a></div>`, 'dates');
 }
 function contactFields(profile, prefix = '') {
   return `<label class="field field-full" for="${prefix}name">Full name<input id="${prefix}name" name="name" autocomplete="name" required maxlength="80" value="${esc(profile.name)}"></label><label class="field" for="${prefix}email">Email address<input id="${prefix}email" name="email" type="email" autocomplete="email" required maxlength="160" value="${esc(profile.email)}"></label><label class="field" for="${prefix}phone">Phone number<input id="${prefix}phone" name="phone" type="tel" autocomplete="tel" required maxlength="30" value="${esc(profile.phone)}"></label>`;
@@ -257,22 +250,22 @@ function policyMarkup() {
   return `<section class="policy-panel" aria-labelledby="appointment-policy"><div class="policy-heading"><span>PLEASE READ BEFORE CONFIRMING</span><h2 id="appointment-policy">Appointment & Payment Policy</h2></div><div class="policy-grid"><p>If you are unable to attend your appointment or are running late, please call <a href="tel:+18328748680">+1 832-874-8680</a> so we can make arrangements.</p><p>Please cancel or reschedule at least <strong>2 hours before your appointment</strong>.</p><p>If you arrive <strong>more than 5 minutes late</strong>, service may be refused and the <strong>full service fee</strong> may be charged.</p><p>A <strong>no-show, including a no-call/no-show, will be charged the full service price</strong>.</p><p class="cash-note">Cash is still accepted.</p></div><label class="agreement policy-agreement"><input type="checkbox" name="policyAccepted" required><span>I have read and agree to the Appointment & Payment Policy, including the 2-hour cancellation or rescheduling requirement, late-arrival policy, and full-service no-show fee.</span></label></section>`;
 }
 function reviewView() {
-  return bookingLayout('YOUR DETAILS.', 2, `<form id="checkout-form"><h2>CONTACT DETAILS.</h2><p class="subtext">Check your information before confirming. It stays in this page's memory only.</p><div class="form-grid">${contactFields(state.profile, 'booking-')}</div><section class="review-section"><h2>HOW WILL YOU PAY?</h2><p class="subtext">No payment is collected in this prototype.</p><label class="payment-choice"><input type="radio" name="payment" value="shop" checked><span>Pay at the Shop<small>Pay in person after your service. Zelle and Cash Welcome.</small></span></label><label class="payment-choice"><input type="radio" name="payment" value="demo-card"><span>Demo card ···· 4242<small>Simulated payment only. No charge will be made.</small></span><span class="badge">DEMO ONLY</span></label></section>${policyMarkup()}<label class="agreement prototype-agreement"><input type="checkbox" name="acknowledge" required><span>I understand this is an approval prototype. Confirming creates a demo appointment only and does not reserve a time or charge a payment.</span></label><p class="error" id="checkout-error" role="alert"></p></form><div class="booking-actions"><a class="text-link" href="#dates">← Change date & time</a></div>`, 'review');
+  return bookingLayout('YOUR DETAILS.', 2, `<form id="checkout-form"><h2>CONTACT DETAILS.</h2><p class="subtext">Check your information before confirming. Your appointment is saved with the shop.</p><div class="form-grid">${contactFields(state.profile, 'booking-')}</div><section class="review-section"><h2>HOW WILL YOU PAY?</h2><p class="subtext">No payment is collected online.</p><label class="payment-choice"><input type="radio" name="payment" value="shop" checked><span>Pay at the Shop<small>Pay in person after your service. Zelle and Cash Welcome.</small></span></label></section>${policyMarkup()}<p class="error" id="checkout-error" role="alert"></p></form><div class="booking-actions"><a class="text-link" href="#dates">← Change date & time</a></div>`, 'review');
 }
 function confirmationView() {
   const appointment = state.confirmation;
   const details = appointmentDetails(appointment);
-  return `<div class="shell confirmation-shell"><section class="confirmation"><div class="confirmation-icon" aria-hidden="true">✓</div><span class="section-code">${esc(appointment.id)} / DEMO CONFIRMATION</span><h1>DEMO APPOINTMENT<br>CONFIRMED.</h1><p>This is how a confirmed appointment will be presented. No real appointment was booked and no payment was collected.</p><div class="confirmation-card"><h2>${esc(details.service.name)}</h2><div class="detail-grid"><div><small>DATE & TIME</small><strong>${dateLabel(appointment.date)}<br>${timeLabel(appointment.time)} · Central time</strong></div><div><small>SERVICE</small><strong>${details.duration} minutes · ${money(details.priceCents)}${details.upgrades.length ? `<br>Upgradez: ${details.upgrades.map(item => esc(item.name)).join(' · ')}` : ''}</strong></div><div><small>THE SHOP</small><strong>Rolaz Cutz Barbershop<br>20260 Katy Freeway, Suite 116<br>Katy, TX 77449</strong></div><div><small>PAYMENT PREVIEW</small><strong>${appointment.paymentMethod === 'demo-card' ? 'Demo card ···· 4242' : 'Pay at the Shop · Zelle and Cash Welcome'}<br>No payment collected</strong></div></div></div><div class="policy-reminder"><strong>Plans changed or running late?</strong><span>Call <a href="tel:+18328748680">+1 832-874-8680</a>. Cancel or reschedule at least 2 hours before the appointment.</span></div><div class="hero-actions"><a href="#profile" class="button">View my appointments</a><a href="#home" class="text-link">Back to the shop</a></div><div class="notice">No confirmation email or text is sent from this prototype. Your demo appointment appears in My profile until you reload the page.</div></section></div>`;
+  return `<div class="shell confirmation-shell"><section class="confirmation"><div class="confirmation-icon" aria-hidden="true">✓</div><span class="section-code">${esc(appointment.id)} / CONFIRMATION</span><h1>APPOINTMENT<br>CONFIRMED.</h1><p>Your appointment is booked. No payment was collected online; pay at the shop.</p><div class="confirmation-card"><h2>${esc(details.service.name)}</h2><div class="detail-grid"><div><small>DATE & TIME</small><strong>${dateLabel(appointment.date)}<br>${timeLabel(appointment.time)} · Central time</strong></div><div><small>SERVICE</small><strong>${details.duration} minutes · ${money(details.priceCents)}${details.upgrades.length ? `<br>Upgradez: ${details.upgrades.map(item => esc(item.name)).join(' · ')}` : ''}</strong></div><div><small>THE SHOP</small><strong>Rolaz Cutz Barbershop<br>20260 Katy Freeway, Suite 116<br>Katy, TX 77449</strong></div><div><small>PAYMENT PREVIEW</small><strong>Pay at the Shop · Zelle and Cash Welcome<br>No payment collected</strong></div></div></div><div class="policy-reminder"><strong>Plans changed or running late?</strong><span>Call <a href="tel:+18328748680">+1 832-874-8680</a>. Cancel or reschedule at least 2 hours before the appointment.</span></div><div class="hero-actions"><a href="#profile" class="button">View my appointments</a><a href="#home" class="text-link">Back to the shop</a></div><div class="notice">No confirmation email or text is sent yet. Your appointment is saved in My appointments on this device.</div></section></div>`;
 }
 function appointmentCard(appointment) {
   const details = appointmentDetails(appointment);
-  return `<article class="appointment-card"><div class="appointment-top"><div><h3>${esc(details.service.name)}</h3><p>${shortDate(appointment.date)} · ${timeLabel(appointment.time)} CT<br>${details.duration} minutes · ${money(details.priceCents)} · Rolaz Cutz${details.upgrades.length ? `<br>Upgradez: ${details.upgrades.map(item => esc(item.name)).join(' · ')}` : ''}</p></div><span class="badge ${appointment.status === 'confirmed' ? 'badge-confirmed' : ''}">${appointment.status === 'confirmed' ? 'DEMO BOOKED' : esc(appointment.status.toUpperCase())}</span></div><div class="appointment-actions">${appointment.status === 'confirmed' ? `<button class="text-link" data-reschedule="${appointment.id}">Reschedule demo</button><button class="text-link" data-cancel="${appointment.id}" aria-expanded="false" aria-controls="cancel-${appointment.id}">Cancel demo</button>` : `<button class="text-link" data-rebook="${appointment.id}">Book this again ↗</button>`}${appointment.sample ? '<span class="subtext">Sample history</span>' : ''}</div>${appointment.status === 'confirmed' ? `<div id="cancel-${appointment.id}" class="cancel-confirmation" role="group" aria-label="Confirm demo cancellation" hidden><p>Cancel this demo appointment?</p><p class="subtext">This only changes the prototype. No real booking will be affected.</p><div class="cancel-confirmation-actions"><button class="button button-small button-secondary" data-keep="${appointment.id}">Keep appointment</button><button class="button button-small" data-confirm-cancel="${appointment.id}">Yes, cancel demo</button></div></div>` : ''}</article>`;
+  return `<article class="appointment-card"><div class="appointment-top"><div><h3>${esc(details.service.name)}</h3><p>${shortDate(appointment.date)} · ${timeLabel(appointment.time)} CT<br>${details.duration} minutes · ${money(details.priceCents)} · Rolaz Cutz${details.upgrades.length ? `<br>Upgradez: ${details.upgrades.map(item => esc(item.name)).join(' · ')}` : ''}</p></div><span class="badge ${appointment.status === 'confirmed' ? 'badge-confirmed' : ''}">${appointment.status === 'confirmed' ? 'BOOKED' : esc(appointment.status.toUpperCase())}</span></div><div class="appointment-actions">${appointment.status === 'confirmed' ? `<button class="text-link" data-reschedule="${appointment.id}">Reschedule</button><button class="text-link" data-cancel="${appointment.id}" aria-expanded="false" aria-controls="cancel-${appointment.id}">Cancel</button>` : `<button class="text-link" data-rebook="${appointment.id}">Book this again ↗</button>`}${appointment.sample ? '<span class="subtext">Sample history</span>' : ''}</div>${appointment.status === 'confirmed' ? `<div id="cancel-${appointment.id}" class="cancel-confirmation" role="group" aria-label="Confirm cancellation" hidden><p>Cancel this appointment?</p><p class="subtext">This frees the time for other customers.</p><div class="cancel-confirmation-actions"><button class="button button-small button-secondary" data-keep="${appointment.id}">Keep appointment</button><button class="button button-small" data-confirm-cancel="${appointment.id}">Yes, cancel</button></div></div>` : ''}</article>`;
 }
 async function profileView() {
-  const appointments = await MockCustomerApi.listAppointments();
+  const appointments = await CustomerApi.listAppointments();
   const upcoming = appointments.filter(item => item.status === 'confirmed');
   const history = appointments.filter(item => item.status !== 'confirmed');
-  return `<div class="shell profile-shell"><div class="booking-header"><span class="section-code">CUSTOMER / DEMO PROFILE</span><h1>MY APPOINTMENTS.</h1></div><div class="profile-grid"><form class="profile-card" id="profile-form"><div class="avatar" aria-hidden="true">${esc(state.profile.name.split(' ').map(part => part[0]).slice(0, 2).join(''))}</div><h2>CONTACT DETAILS</h2><p class="subtext">Demo customer. Details reset when this page reloads.</p>${contactFields(state.profile, 'profile-')}<p id="profile-error" class="error" role="alert"></p><button class="button button-full" type="submit">Save demo profile</button></form><section><div class="section-heading"><h2>UPCOMING</h2><button class="text-link" data-action="new">Book another visit →</button></div>${upcoming.length ? upcoming.map(appointmentCard).join('') : '<div class="empty-state">No upcoming demo appointments. Choose a service when you are ready.</div>'}<h3 class="history-title">PAST & CHANGED</h3><p class="subtext">Includes one example past visit to show how appointment history could look.</p>${history.map(appointmentCard).join('')}<div class="policy-reminder"><strong>Appointment changes</strong><span>Call <a href="tel:+18328748680">+1 832-874-8680</a> if you cannot attend or are running late. Please cancel or reschedule at least 2 hours before your appointment.</span></div><div class="notice">Account sign-in, real reminders, and live appointment management will connect to the future backend.</div></section></div></div>`;
+  return `<div class="shell profile-shell"><div class="booking-header"><span class="section-code">CUSTOMER / PROFILE</span><h1>MY APPOINTMENTS.</h1></div><div class="profile-grid"><form class="profile-card" id="profile-form"><div class="avatar" aria-hidden="true">${esc(state.profile.name.split(' ').map(part => part[0]).slice(0, 2).join(''))}</div><h2>CONTACT DETAILS</h2><p class="subtext">Your details are saved on this device.</p>${contactFields(state.profile, 'profile-')}<p id="profile-error" class="error" role="alert"></p><button class="button button-full" type="submit">Save contact details</button></form><section><div class="section-heading"><h2>UPCOMING</h2><button class="text-link" data-action="new">Book another visit →</button></div>${upcoming.length ? upcoming.map(appointmentCard).join('') : '<div class="empty-state">No upcoming appointments. Choose a service when you are ready.</div>'}<h3 class="history-title">PAST & CHANGED</h3><p class="subtext">Includes one example past visit to show how appointment history could look.</p>${history.map(appointmentCard).join('')}<div class="policy-reminder"><strong>Appointment changes</strong><span>Call <a href="tel:+18328748680">+1 832-874-8680</a> if you cannot attend or are running late. Please cancel or reschedule at least 2 hours before your appointment.</span></div><div class="notice">Account sign-in, real reminders, and live appointment management will connect to the future backend.</div></section></div></div>`;
 }
 async function render(focus = false) {
   const renderId = ++state.renderId;
@@ -294,7 +287,7 @@ async function render(focus = false) {
     const active = link.dataset.nav === route || link.dataset.nav === 'services' && ['dates', 'review', 'confirmation'].includes(route);
     if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   });
-  document.title = `Rolaz Cutz — ${({ services: 'Select service', dates: 'Date & time', review: 'Your details', confirmation: 'Demo confirmation', profile: 'My appointments' })[route] || 'The shop'} · Approval prototype`;
+  document.title = `Rolaz Cutz — ${({ services: 'Select service', dates: 'Date & time', review: 'Your details', confirmation: 'Confirmation', profile: 'My appointments' })[route] || 'The shop'}`;
   if (['#shop-info', '#service-menu'].includes(location.hash)) scrollToHomeSection(location.hash);
   else if (focus) { main.focus({ preventScroll: true }); window.scrollTo(0, 0); }
   return true;
@@ -348,7 +341,7 @@ document.addEventListener('click', async event => {
       document.querySelectorAll('[data-time]').forEach(button => button.setAttribute('aria-pressed', String(Number(button.dataset.time) === state.time)));
       document.querySelector('#booking-summary').innerHTML = summaryView('dates');
     } else if (target.dataset.rebook) {
-      const appointments = await MockCustomerApi.listAppointments();
+      const appointments = await CustomerApi.listAppointments();
       const appointment = appointments.find(item => item.id === target.dataset.rebook);
       restoreBookingSelection(appointment);
       go('services');
@@ -364,13 +357,13 @@ document.addEventListener('click', async event => {
       trigger.focus();
     } else if (target.dataset.confirmCancel) {
       target.disabled = true;
-      await MockCustomerApi.cancelAppointment({ id: target.dataset.confirmCancel });
+      await CustomerApi.cancelAppointment({ id: target.dataset.confirmCancel });
       await render();
       main.focus({ preventScroll: true });
-      announce('Demo appointment canceled. No real booking was changed.');
+      announce('Your appointment was canceled.');
     }
     else if (target.dataset.reschedule) {
-      const appointments = await MockCustomerApi.listAppointments();
+      const appointments = await CustomerApi.listAppointments();
       const appointment = appointments.find(item => item.id === target.dataset.reschedule);
       restoreBookingSelection(appointment, appointment.id);
       go('dates');
@@ -386,30 +379,29 @@ document.addEventListener('submit', async event => {
   if (form.id === 'profile-form') {
     const button = form.querySelector('button');
     button.disabled = true;
-    try { state.profile = await MockCustomerApi.updateProfile(customer); await render(); announce('Demo profile saved for this page session.'); }
+    try { state.profile = await CustomerApi.updateProfile(customer); await render(); announce('Contact details saved.'); }
     catch (error) { document.querySelector('#profile-error').textContent = error.message; button.disabled = false; }
     return;
   }
   const button = document.querySelector('[form="checkout-form"]');
   button.disabled = true;
-  button.textContent = 'Creating demo appointment…';
+  button.textContent = 'Booking your appointment…';
   try {
     const policyAccepted = data.get('policyAccepted') === 'on';
-    const prototypeAcknowledged = data.get('acknowledge') === 'on';
-    if (!policyAccepted || !prototypeAcknowledged) throw new Error('Please accept the policy and prototype acknowledgments before continuing.');
-    state.confirmation = await MockCustomerApi.createAppointment({ serviceId: state.serviceId, upgradeIds: state.upgradeIds, date: state.date, time: state.time, customer, paymentMethod: data.get('payment'), policyAccepted, replacesId: state.replacesId });
-    state.profile = await MockCustomerApi.getProfile();
+        if (!policyAccepted) throw new Error('Please accept the Appointment & Payment Policy before continuing.');
+    state.confirmation = await CustomerApi.createAppointment({ serviceId: state.serviceId, upgradeIds: state.upgradeIds, date: state.date, time: state.time, customer, paymentMethod: data.get('payment'), policyAccepted, replacesId: state.replacesId });
+    state.profile = await CustomerApi.getProfile();
     state.replacesId = null;
     go('confirmation');
   } catch (error) {
     document.querySelector('#checkout-error').textContent = error.message;
     button.disabled = false;
-    button.textContent = 'Confirm demo appointment';
+    button.textContent = 'Confirm appointment';
   }
 });
 window.addEventListener('hashchange', () => render(true));
 (async function init() {
   main.innerHTML = '<div class="shell loading" role="status">Getting the shop ready…</div>';
-  [state.services, state.upgrades, state.business, state.profile] = await Promise.all([MockCustomerApi.getServices(), MockCustomerApi.getUpgrades(), MockCustomerApi.getBusiness(), MockCustomerApi.getProfile()]);
+  [state.services, state.upgrades, state.business, state.profile] = await Promise.all([CustomerApi.getServices(), CustomerApi.getUpgrades(), CustomerApi.getBusiness(), CustomerApi.getProfile()]);
   await render();
 })();
