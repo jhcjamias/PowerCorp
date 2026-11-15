@@ -3,7 +3,6 @@
 
 import { computed, reactive } from 'vue'
 import { login } from './authService'
-import { normalizePhone } from './validators'
 
 const STORAGE_KEY = 'rolaz_admin_session'
 
@@ -32,8 +31,9 @@ const user = computed(() => state.session?.user ?? null)
 const token = computed(() => state.session?.token ?? null)
 
 // Throws an AuthError (with a friendly .message) when sign-in fails.
-async function signIn(phone, password) {
-  const session = await login(normalizePhone(phone), password)
+async function signIn(identifier, password) {
+  // identifier = email, username or phone number; login() cleans it up.
+  const session = await login(identifier, password)
   state.session = session
   writeSession(session)
 }

@@ -1678,25 +1678,36 @@ def public_instagram():
 _DUMMY_PASSWORD_HASH = generate_password_hash(secrets.token_urlsafe(16))
 
 
+def find_staff_by_login(identifier):
+    """Find a staff member by username, or by email when the text contains an @ sign."""
+    text = identifier.strip() if isinstance(identifier, str) else ""
+    if not text:
+        return None
+    column = "email" if "@" in text else "username"
+    rows = read(
+        f"SELECT staff_id, name, role, phone, email, username, password_hash FROM Staff "
+        f"WHERE LOWER({column}) = LOWER(%s) LIMIT 1",
+        (text,),
+    )
+    return rows[0] if rows else None
+
+
 @app.route("/api/auth/login", methods=["POST"])
 def admin_login():
     data = json_body()
-    phone = try_normalize_phone(data.get("phone") or "")
+    # "identifier" is the username, or the email address if the admin forgot the username.
+    identifier = data.get("identifier") or ""
     password = data.get("password")
-    if not phone or not isinstance(password, str) or not password:
-        raise ApiError(401, "Wrong phone number or password.")
+    if not isinstance(identifier, str) or not identifier.strip() or not isinstance(password, str) or not password:
+        raise ApiError(401, "Wrong login name or password.")
 
-    staff = None
-    for row in read("SELECT staff_id, name, role, phone, password_hash FROM Staff WHERE phone IS NOT NULL"):
-        if try_normalize_phone(row["phone"]) == phone:
-            staff = row
-            break
+    staff = find_staff_by_login(identifier)
 
     password_ok = check_password_hash(
         staff["password_hash"] if staff else _DUMMY_PASSWORD_HASH, password
     )
     if not staff or not password_ok:
-        raise ApiError(401, "Wrong phone number or password.")
+        raise ApiError(401, "Wrong login name or password.")
     if staff["role"] != "admin":
         raise ApiError(403, "You don't have permission to use the admin site.")
 
@@ -1748,6 +1759,75 @@ def admin_logout():
         "UPDATE Staff_Session SET revoked_at = %s WHERE token_hash = %s",
         (utc_now(), sha256_hex(bearer_token())),
     )
+    return "", 204
+
+
+# ---------------------------------------------------------------------------
+# Admin "Forgot password": each admin has a private 6-digit PIN (set by the shop owner
+# with 003_admin_pin.sql or set_admin_pin.py). Username + PIN lets the admin choose a new password, which is
+# saved in the Staff table. No email or text message is needed.
+# Needs the Staff columns from migrations/003_admin_pin.sql.
+# ---------------------------------------------------------------------------
+
+PIN_MAX_ATTEMPTS = 5
+PIN_LOCK_MINUTES = 15
+
+
+@app.route("/api/auth/reset-password", methods=["POST"])
+def admin_reset_password():
+    data = json_body()
+    username = data.get("username")
+    pin = data.get("pin")
+    new_password = data.get("newPassword")
+    if not isinstance(username, str) or not username.strip():
+        raise ApiError(400, "Enter your username.")
+    if not isinstance(pin, str) or not re.fullmatch(r"\d{6}", pin.strip()):
+        raise ApiError(400, "Enter your 6-digit PIN.")
+    if not isinstance(new_password, str) or not 8 <= len(new_password) <= 128:
+        raise ApiError(400, "The new password must be 8 to 128 characters.")
+    pin = pin.strip()
+    bad_pin = "Username or PIN is incorrect."
+
+    rows = read(
+        "SELECT staff_id, role, pin, pin_failed_attempts, pin_locked_until FROM Staff "
+        "WHERE LOWER(username) = LOWER(%s) LIMIT 1",
+        (username.strip(),),
+    )
+    staff = rows[0] if rows else None
+    now = utc_now()
+
+    if staff and staff["pin_locked_until"]:
+        if staff["pin_locked_until"] > now:
+            minutes = max(1, int((staff["pin_locked_until"] - now).total_seconds() // 60) + 1)
+            raise ApiError(429, f"Too many wrong PIN tries. Try again in {minutes} minutes.")
+        # The lock has run out: start counting again.
+        write("UPDATE Staff SET pin_failed_attempts = 0, pin_locked_until = NULL WHERE staff_id = %s",
+              (staff["staff_id"],))
+        staff["pin_failed_attempts"] = 0
+
+    # The PIN typed in is compared with the PIN saved in the Staff table (same time for any username).
+    has_pin = bool(staff and staff["role"] == "admin" and staff["pin"])
+    pin_ok = hmac.compare_digest(str(staff["pin"]) if has_pin else "------", pin)
+    if not has_pin or not pin_ok:
+        if has_pin:
+            # Count the wrong try in the database; lock the account after too many.
+            write(
+                "UPDATE Staff SET pin_failed_attempts = pin_failed_attempts + 1, "
+                "pin_locked_until = IF(pin_failed_attempts >= %s, %s, pin_locked_until) "
+                "WHERE staff_id = %s",
+                (PIN_MAX_ATTEMPTS, now + timedelta(minutes=PIN_LOCK_MINUTES), staff["staff_id"]),
+            )
+        raise ApiError(400, bad_pin)
+
+    # Save the new password hash in the database, clear the PIN counter, sign out old logins.
+    with transaction():
+        write(
+            "UPDATE Staff SET password_hash = %s, pin_failed_attempts = 0, pin_locked_until = NULL "
+            "WHERE staff_id = %s",
+            (generate_password_hash(new_password), staff["staff_id"]), commit=False,
+        )
+        write("UPDATE Staff_Session SET revoked_at = %s WHERE staff_id = %s AND revoked_at IS NULL",
+              (now, staff["staff_id"]), commit=False)
     return "", 204
 
 
