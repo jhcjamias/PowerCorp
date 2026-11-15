@@ -5,6 +5,7 @@
 //   GET   /api/services        -> [service, ...]   (or { services: [...] })
 //   POST  /api/services        body { kind, name, price, durationMin, serviceIds?, active } -> the new item
 //   PATCH /api/services/:id    body: any of { name, price, durationMin, serviceIds, active } -> the updated item
+//   DELETE /api/services/:id   -> 204. The back end refuses (409) when the service was ever booked; hide it instead.
 //
 // service: { id: "regular", kind: "service", name: "The OG", price: 45, durationMin: 35, active: true }
 // upgrade: { id: "scissor-workz", kind: "upgrade", name: "Scissor Workz", price: 5, durationMin: 5,
@@ -15,7 +16,7 @@
 // An appointment keeps a copy of the name, price and duration it was booked with.
 // Changing a price here must NOT change appointments that already exist.
 
-import { apiRequest, USE_MOCK_API } from '@/admin/shared/apiClient'
+import { ApiError, apiRequest, USE_MOCK_API } from '@/admin/shared/apiClient'
 import { getMockServices } from './mockServices'
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -58,4 +59,31 @@ export async function updateService(id, patch) {
     return clone(found)
   }
   return apiRequest(`/api/services/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch })
+}
+
+// Permanently removes a service or upgrade. Only for ones nobody has booked yet; anything with
+// booking history should be hidden instead so old appointments keep their service.
+export async function deleteService(id) {
+  if (USE_MOCK_API) {
+    await wait(400)
+    const list = getMockServices()
+    const index = list.findIndex((s) => s.id === id)
+    if (index === -1) throw new Error('That service no longer exists.')
+    list.splice(index, 1)
+    list.forEach((s) => {
+      if (s.serviceIds) s.serviceIds = s.serviceIds.filter((x) => x !== id)
+    })
+    return
+  }
+  try {
+    await apiRequest(`/api/services/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      throw new Error('This has been booked before, so it cannot be deleted. Hide it instead.')
+    }
+    if (error instanceof ApiError && [404, 405].includes(error.status)) {
+      throw new Error('Delete is not available on the server yet. Hide it for now.')
+    }
+    throw error
+  }
 }

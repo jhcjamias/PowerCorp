@@ -16,6 +16,7 @@ const {
   statusMessage,
   save,
   setActive,
+  remove,
   clearActionError,
 } = useServices()
 
@@ -29,6 +30,15 @@ async function edit(service) {
   formBox.value?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
 }
 
+// Two-step delete: the first click asks "Delete?", the second one confirms.
+const confirmingId = ref(null)
+
+async function confirmDelete(service) {
+  const done = await remove(service)
+  confirmingId.value = null
+  if (done && editing.value?.id === service.id) editing.value = null
+}
+
 function stopEditing() {
   editing.value = null
 }
@@ -38,7 +48,7 @@ function stopEditing() {
   <div class="page">
     <p class="intro">
       The services, upgrades and prices customers can book. These are the same choices the
-      customer site shows. Hide one to stop new bookings for it without losing past appointments.
+      customer site shows. Hide one to stop new bookings for it without losing past appointments. Delete only works for ones nobody has booked yet.
     </p>
 
     <p class="sr-only" role="status" aria-live="polite">{{ statusMessage }}</p>
@@ -92,6 +102,11 @@ function stopEditing() {
                   >
                     {{ s.active ? 'Hide' : 'Show' }}
                   </button>
+                  <template v-if="confirmingId === s.id">
+                    <button type="button" class="danger" :disabled="busy" :aria-label="`Confirm delete ${s.name}`" @click="confirmDelete(s)">Confirm</button>
+                    <button type="button" :disabled="busy" @click="confirmingId = null">Cancel</button>
+                  </template>
+                  <button v-else type="button" class="danger-outline" :disabled="busy" :aria-label="`Delete ${s.name} (${s.kind === 'upgrade' ? 'upgrade' : 'service'})`" @click="confirmingId = s.id">Delete</button>
                 </td>
               </tr>
             </tbody>
@@ -249,6 +264,17 @@ tr.editing {
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.actions button.danger {
+  background: var(--rc-red);
+  border-color: var(--rc-red);
+  color: #fff;
+}
+
+.actions button.danger-outline {
+  border-color: var(--rc-red);
+  color: var(--rc-red);
 }
 
 .actions button:disabled {

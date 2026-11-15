@@ -1,7 +1,7 @@
 // State and logic for the Services & Prices page.
 
 import { computed, onMounted, ref } from 'vue'
-import { createService, listServices, updateService } from './servicesService'
+import { createService, deleteService, listServices, updateService } from './servicesService'
 
 export const MAX_PRICE = 1000
 
@@ -110,6 +110,16 @@ export function useServices() {
     }, active ? `${service.name} is now shown to customers.` : `${service.name} is now hidden from customers.`)
   }
 
+  // Deletes for good. The server refuses when the service was ever booked.
+  function remove(service) {
+    return run(async () => {
+      await deleteService(service.id)
+      items.value = items.value
+        .filter((s) => s.id !== service.id)
+        .map((s) => (s.serviceIds ? { ...s, serviceIds: s.serviceIds.filter((x) => x !== service.id) } : s))
+    }, `${service.name} deleted.`)
+  }
+
   function clearActionError() {
     actionError.value = ''
   }
@@ -126,6 +136,7 @@ export function useServices() {
     statusMessage,
     save,
     setActive,
+    remove,
     clearActionError,
   }
 }
