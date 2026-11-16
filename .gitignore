@@ -4,3 +4,11 @@ Back End/__pycache__/
 Back End/migrations/
 Back End/tests
 
+
+# Secrets and local environment (never commit)
+Back End/creds_local.py
+.env
+**/.env
+.venv/
+**/__pycache__/
+.DS_Store

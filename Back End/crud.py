@@ -172,6 +172,12 @@ DB_SETTINGS = (
     os.getenv("DB_NAME") or my_creds.dbName,
     int(os.getenv("DB_PORT", "3306")),
 )
+if not all(DB_SETTINGS[:4]):
+    message = ("Database settings are missing. Set DB_HOST, DB_USER, DB_PASSWORD and DB_NAME, "
+               "or create Back End/creds_local.py for local development.")
+    if IS_PRODUCTION:
+        raise RuntimeError(message)
+    logger.warning(message)
 
 
 class ApiError(Exception):
