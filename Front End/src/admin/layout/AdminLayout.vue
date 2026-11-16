@@ -6,7 +6,7 @@ import logoUrl from '@/assets/rolaz-logo.png'
 
 const route = useRoute()
 const router = useRouter()
-const { isAuthenticated, user, signOut } = useAuth()
+const { isAuthenticated, user, logOut } = useAuth()
 
 const navItems = [
   { label: 'Dashboard', to: { name: 'admin-dashboard' } },
@@ -43,7 +43,7 @@ watch(isAuthenticated, (signedIn) => {
         </RouterLink>
       </nav>
 
-      <button type="button" class="logout" @click="signOut">Log out</button>
+      <button type="button" class="logout" @click="logOut">Log out</button>
     </aside>
 
     <div class="main">

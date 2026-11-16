@@ -2,7 +2,7 @@
 // The session lives in sessionStorage, so closing the tab signs the admin out.
 
 import { computed, reactive } from 'vue'
-import { login } from './authService'
+import { login, logout } from './authService'
 
 const STORAGE_KEY = 'rolaz_admin_session'
 
@@ -38,11 +38,19 @@ async function signIn(identifier, password) {
   writeSession(session)
 }
 
+// Clears the session in this browser only (used when the server already rejected the token).
 function signOut() {
   state.session = null
   writeSession(null)
 }
 
+// The Log out button: revoke the token on the server, then clear it here.
+function logOut() {
+  const current = token.value
+  signOut()
+  logout(current)
+}
+
 export function useAuth() {
-  return { isAuthenticated, user, token, signIn, signOut }
+  return { isAuthenticated, user, token, signIn, signOut, logOut }
 }

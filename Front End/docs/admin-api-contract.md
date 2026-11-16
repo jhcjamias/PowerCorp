@@ -127,7 +127,8 @@ Other statuses: `404` if the id doesn't exist.
 | `POST /api/services` | `{ name, price, durationMin, active }` | `201` the new service (with its `id`) |
 | `PATCH /api/services/:id` | any of `name`, `price`, `durationMin`, `active` | the updated service |
 
-- There is no delete. A service is hidden with `active: false`, so old appointments keep their service.
+- `DELETE /api/services/:id` -> `204`, only for a service that has never been booked. If any appointment
+  uses it the server answers `409`; hide it with `active: false` instead, so old appointments keep their service.
 - `active: false` services must not be offered on the customer booking page.
 - An appointment stores its own copy of the name, price and duration it was booked with (see section 2).
   Changing a price here must **not** change appointments that already exist.

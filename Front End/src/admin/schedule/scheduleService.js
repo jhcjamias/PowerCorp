@@ -6,7 +6,7 @@
 //   GET    /api/staff/:id/time-off            -> [{ slot_id, day_off_date, start_time, end_date, end_time }]
 //   POST   /api/staff/:id/time-off            body { slot_start: "YYYY-MM-DD HH:MM:SS", slot_end }
 //   PUT    /api/staff/:id/weekly-hours        body { day_of_week, is_open, start_time, end_time } (one day per call)
-//   DELETE /api/staff/:id/time-off/:slotId    (NOT in the back end yet; ask the back-end developer to add it)
+//   DELETE /api/staff/:id/time-off/:slotId    -> 204 (404 if it does not exist)
 //
 // weeklyHours item: { day: 0-6 (Sunday = 0), open: true|false, start: "11:00", end: "19:00" }
 // timeOff item:     { id, date: "2026-11-03", endDate: "2026-11-05", allDay: true,
