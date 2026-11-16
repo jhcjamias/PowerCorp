@@ -3,6 +3,7 @@ import { nextTick, ref } from 'vue'
 import PaginationBar from '@/admin/shared/components/PaginationBar.vue'
 import AppointmentDetail from './components/AppointmentDetail.vue'
 import AppointmentFilters from './components/AppointmentFilters.vue'
+import NewAppointmentForm from './components/NewAppointmentForm.vue'
 import AppointmentsTable from './components/AppointmentsTable.vue'
 import { useAppointments } from './useAppointments'
 
@@ -31,12 +32,28 @@ const {
   clearActionError,
   cancel,
   complete,
+  noShow,
   reschedule,
+  catalog,
+  create,
+  createError,
 } = useAppointments()
+
+// The New appointment form takes the place of the details panel while it is open.
+const adding = ref(false)
+const newForm = ref(null)
+async function startAdding() {
+  createError.value = ''
+  adding.value = true
+  await nextTick()
+  detailBox.value?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  newForm.value?.focus()
+}
 
 // When the list and the details are stacked (narrow screens), bring the details into view.
 const detailBox = ref(null)
 async function pick(id) {
+  adding.value = false
   select(id)
   await nextTick()
   detailBox.value?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
@@ -45,7 +62,12 @@ async function pick(id) {
 
 <template>
   <div class="page">
-    <p class="intro">Find, review and change customer bookings.</p>
+    <div class="top">
+      <p class="intro">Find, review and change customer bookings.</p>
+      <button type="button" class="add" :disabled="loading || !!loadError || catalog.length === 0" @click="startAdding">
+        New appointment
+      </button>
+    </div>
 
     <AppointmentFilters
       :filters="filters"
@@ -85,13 +107,25 @@ async function pick(id) {
       </section>
 
       <aside ref="detailBox" class="side">
+        <NewAppointmentForm
+          v-if="adding"
+          ref="newForm"
+          :catalog="catalog"
+          :busy="actionBusy"
+          :error="createError"
+          :submit="create"
+          @clear-error="createError = ''"
+          @done="adding = false"
+        />
         <AppointmentDetail
+          v-else
           :appointment="selected"
           :busy="actionBusy"
           :error="actionError"
           @clear-error="clearActionError"
           @cancel="cancel(selected.id)"
           @complete="complete(selected.id)"
+          @no-show="noShow(selected.id)"
           @reschedule="reschedule(selected.id, $event)"
         />
       </aside>
@@ -105,6 +139,24 @@ async function pick(id) {
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   min-width: 0;
+}
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.add {
+  background: var(--rc-ink);
+  color: #fff;
+}
+
+.add:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .intro {

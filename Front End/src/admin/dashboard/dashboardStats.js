@@ -1,8 +1,8 @@
 // Numbers for the dashboard, worked out from the appointment list.
-// Revenue only counts appointments marked Completed.
+// Revenue counts Completed visits and No-show fees (the full price is charged for a no-show).
 
-import { toDateKey, parseDateTime } from '@/admin/shared/format'
-import { appointmentTotal } from '@/admin/appointments/utils'
+import { toDateKey, parseDateTime, shopNow } from '@/admin/shared/format'
+import { appointmentTotal, isBillable } from '@/admin/appointments/utils'
 
 const addDays = (date, n) => {
   const d = new Date(date)
@@ -12,7 +12,7 @@ const addDays = (date, n) => {
 
 const startTime = (a) => parseDateTime(a.date, a.time).getTime()
 
-export function dashboardStats(appointments, now = new Date()) {
+export function dashboardStats(appointments, now = shopNow()) {
   const today = toDateKey(now)
   const weekEnd = toDateKey(addDays(now, 6))
   const weekAgo = toDateKey(addDays(now, -6))
@@ -35,7 +35,7 @@ export function dashboardStats(appointments, now = new Date()) {
       (a) => a.status === 'Booked' && a.date >= today && a.date <= weekEnd,
     ).length,
     revenueLast7: appointments
-      .filter((a) => a.status === 'Completed' && a.date >= weekAgo && a.date <= today)
+      .filter((a) => isBillable(a) && a.date >= weekAgo && a.date <= today)
       .reduce((sum, a) => sum + appointmentTotal(a), 0),
     cancelledLast30: appointments.filter(
       (a) => a.status === 'Cancelled' && a.date >= monthAgo && a.date <= today,

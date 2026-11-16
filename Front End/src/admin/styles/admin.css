@@ -1,7 +1,8 @@
 /* Rolaz Cutz admin theme: red, black and white (from the wireframes). */
 :root {
-  --rc-red: #c8102e;
-  --rc-red-dark: #a30d25;
+  --rc-red: #f50735; /* the brand red, same as the customer site */
+  --rc-red-dark: #b90025; /* red for text and for buttons with white text (passes contrast) */
+  --rc-heading: Impact, Haettenschweiler, 'Arial Narrow Bold', 'Franklin Gothic Heavy', sans-serif;
   --rc-ink: #111111;
   --rc-muted: #5c5c5c;
   --rc-line: #c9c7c0;
@@ -9,7 +10,7 @@
   --rc-card: #ffffff;
   --rc-surface: #f7f6f3;
   --rc-error-bg: #fdecef;
-  --rc-focus: rgba(200, 16, 46, 0.45);
+  --rc-focus: rgba(245, 7, 53, 0.45);
   --rc-radius: 12px;
 }
 

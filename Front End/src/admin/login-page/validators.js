@@ -32,3 +32,27 @@ export function validatePassword(value) {
   if (!value) return 'Enter your password.'
   return ''
 }
+
+export const MIN_PASSWORD_LENGTH = 8
+
+// New passwords must be at least 8 characters.
+export function validateNewPassword(value) {
+  if (!value) return 'Enter a new password.'
+  if (value.length < MIN_PASSWORD_LENGTH) return `Use at least ${MIN_PASSWORD_LENGTH} characters.`
+  return ''
+}
+
+export function validatePin(value) {
+  return /^\d{6}$/.test(String(value ?? '').trim()) ? '' : 'Enter your 6-digit PIN.'
+}
+
+// Login uses a username (or the email address if the username was forgotten).
+export function validateUsername(value) {
+  return String(value ?? '').trim() ? '' : 'Enter your username.'
+}
+
+export function validateEmail(value) {
+  const text = String(value ?? '').trim()
+  if (!text) return 'Enter your email address.'
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(text) ? '' : 'Enter a valid email address.'
+}

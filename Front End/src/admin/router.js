@@ -1,8 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuth } from '@/admin/login-page/useAuth'
 
-const ComingSoon = () => import('@/admin/layout/ComingSoonView.vue')
-
 const routes = [
   // The customer site will own "/" later; for now it just opens the admin area.
   { path: '/', redirect: '/admin' },
@@ -22,7 +20,7 @@ const routes = [
       {
         path: 'dashboard',
         name: 'admin-dashboard',
-        component: () => import('@/admin/views/AdminHomePlaceholder.vue'),
+        component: () => import('@/admin/dashboard/DashboardView.vue'),
         meta: { title: 'Dashboard' },
       },
       {
@@ -37,9 +35,24 @@ const routes = [
         component: () => import('@/admin/schedule/ScheduleView.vue'),
         meta: { title: 'Schedule & Time Off' },
       },
-      { path: 'services', name: 'admin-services', component: ComingSoon, meta: { title: 'Services & Prices' } },
-      { path: 'customers', name: 'admin-customers', component: ComingSoon, meta: { title: 'Customers' } },
-      { path: 'reports', name: 'admin-reports', component: ComingSoon, meta: { title: 'Reports' } },
+      {
+        path: 'services',
+        name: 'admin-services',
+        component: () => import('@/admin/services/ServicesView.vue'),
+        meta: { title: 'Services & Prices' },
+      },
+      {
+        path: 'customers',
+        name: 'admin-customers',
+        component: () => import('@/admin/customers/CustomersView.vue'),
+        meta: { title: 'Customers' },
+      },
+      {
+        path: 'reports',
+        name: 'admin-reports',
+        component: () => import('@/admin/reports/ReportsView.vue'),
+        meta: { title: 'Reports' },
+      },
     ],
   },
 

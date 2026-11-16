@@ -1,13 +1,21 @@
 <script setup>
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import {
   formatDateLong,
   formatMoney,
   formatPhoneDisplay,
   formatTime,
+  parseDateTime,
+  shopNow,
   toDateKey,
 } from '@/admin/shared/format'
-import { appointmentEnd, appointmentMinutes, appointmentTotal } from '../utils'
+import {
+  appointmentEnd,
+  appointmentMinutes,
+  appointmentTotal,
+  insidePolicyWindow,
+  POLICY_HOURS,
+} from '../utils'
 import StatusBadge from './StatusBadge.vue'
 
 const props = defineProps({
@@ -16,13 +24,20 @@ const props = defineProps({
   error: { type: String, default: '' },
 })
 
-const emit = defineEmits(['reschedule', 'cancel', 'complete', 'clear-error'])
+const emit = defineEmits(['reschedule', 'cancel', 'complete', 'no-show', 'clear-error'])
 
-// 'view' | 'reschedule' | 'cancel' | 'complete'
+// 'view' | 'reschedule' | 'cancel' | 'complete' | 'no-show'
 const mode = ref('view')
 const newDate = ref('')
 const newTime = ref('')
-const today = toDateKey(new Date())
+const today = toDateKey(shopNow())
+
+// The shop's policy: customers cancel or reschedule at least 2 hours ahead.
+const lateChange = computed(() => (props.appointment ? insidePolicyWindow(props.appointment) : false))
+// A no-show can only be recorded once the appointment time has come.
+const canNoShow = computed(() =>
+  props.appointment ? parseDateTime(props.appointment.date, props.appointment.time) <= shopNow() : false,
+)
 
 const heading = ref(null)
 const dateInput = ref(null)
@@ -75,6 +90,10 @@ watch(
         <div>
           <dt>Phone</dt>
           <dd>{{ formatPhoneDisplay(appointment.customer.phone) }}</dd>
+        </div>
+        <div v-if="appointment.customer.email">
+          <dt>E-mail</dt>
+          <dd class="wrap">{{ appointment.customer.email }}</dd>
         </div>
         <div>
           <dt>When</dt>
@@ -131,6 +150,7 @@ watch(
         <div v-if="mode === 'view'" class="buttons">
           <button type="button" class="primary" @click="setMode('complete')">Completed</button>
           <button type="button" @click="setMode('reschedule')">Reschedule</button>
+          <button v-if="canNoShow" type="button" @click="setMode('no-show')">No-show</button>
           <button type="button" class="danger" @click="setMode('cancel')">
             Cancel appointment
           </button>
@@ -138,6 +158,10 @@ watch(
 
         <form v-else-if="mode === 'reschedule'" class="panel" novalidate @submit.prevent="emit('reschedule', { date: newDate, time: newTime })">
           <h3>Pick a new time</h3>
+          <p v-if="lateChange" class="policy" role="note">
+            This appointment starts in under {{ POLICY_HOURS }} hours (or has started). The shop's policy asks
+            customers to reschedule at least {{ POLICY_HOURS }} hours ahead.
+          </p>
           <div class="field">
             <label for="new-date">New date</label>
             <input id="new-date" ref="dateInput" v-model="newDate" type="date" :min="today" required />
@@ -168,8 +192,26 @@ watch(
           </div>
         </div>
 
+        <div v-else-if="mode === 'no-show'" class="panel" role="group" aria-labelledby="noshow-heading">
+          <h3 id="noshow-heading">Mark this as a no-show?</h3>
+          <p class="muted">
+            {{ appointment.customer.name }} did not come. Under the shop's policy a no-show is charged the
+            full price ({{ formatMoney(appointmentTotal(appointment)) }}), and it counts as revenue.
+          </p>
+          <div class="buttons">
+            <button type="button" class="danger solid" :disabled="busy" @click="emit('no-show')">
+              {{ busy ? 'Saving…' : 'Yes, mark no-show' }}
+            </button>
+            <button type="button" class="ghost" :disabled="busy" @click="backToView">Not yet</button>
+          </div>
+        </div>
+
         <div v-else class="panel" role="group" aria-labelledby="cancel-heading">
           <h3 id="cancel-heading">Cancel this appointment?</h3>
+          <p v-if="lateChange" class="policy" role="note">
+            This appointment starts in under {{ POLICY_HOURS }} hours (or has started). The shop's policy asks
+            customers to cancel at least {{ POLICY_HOURS }} hours ahead, so the full price may be charged.
+          </p>
           <p class="muted">
             {{ appointment.customer.name }}'s appointment on {{ formatDateLong(appointment.date) }}
             at {{ formatTime(appointment.time) }} will be marked as cancelled.
@@ -183,7 +225,13 @@ watch(
         </div>
       </div>
       <p v-else class="muted">
-        {{ appointment.status === 'Cancelled' ? 'This appointment was cancelled.' : 'This appointment is finished.' }}
+        {{
+          appointment.status === 'Cancelled'
+            ? 'This appointment was cancelled.'
+            : appointment.status === 'No-show'
+              ? 'The customer did not come. The full price is charged.'
+              : 'This appointment is finished.'
+        }}
       </p>
     </template>
 
@@ -238,6 +286,19 @@ h3 {
 
 .facts dd {
   margin: 2px 0 0;
+  font-weight: 600;
+}
+
+.wrap {
+  overflow-wrap: anywhere;
+}
+
+.policy {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-left: 4px solid var(--rc-red);
+  background: var(--rc-error-bg);
+  color: var(--rc-red-dark);
   font-weight: 600;
 }
 
@@ -373,7 +434,7 @@ button.danger {
 }
 
 button.danger.solid {
-  background: var(--rc-red);
+  background: var(--rc-red-dark);
   color: #fff;
 }
 

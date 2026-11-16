@@ -2,26 +2,37 @@
 import { nextTick, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '@/admin/login-page/useAuth'
-import { MOCK_CREDENTIALS, USE_MOCK_AUTH } from '@/admin/login-page/authService'
-import { formatPhone, validatePassword, validatePhone } from '@/admin/login-page/validators'
+import logoUrl from '@/assets/rolaz-logo.png'
+import { MOCK_CREDENTIALS, MOCK_RESET_PIN, resetPassword, USE_MOCK_AUTH } from '@/admin/login-page/authService'
+import { validateEmail, validateNewPassword, validatePassword, validatePin, validateUsername } from '@/admin/login-page/validators'
 
 const { signIn } = useAuth()
 const route = useRoute()
 const router = useRouter()
 
-const form = reactive({ phone: '', password: '' })
-const errors = reactive({ phone: '', password: '' })
+const form = reactive({ identifier: '', password: '' })
+const errors = reactive({ identifier: '', password: '' })
 const formError = ref('')
 const notice = ref('')
 const submitting = ref(false)
 const showPassword = ref(false)
 
-const phoneInput = ref(null)
+// Log in with the username; or with the email address if the username was forgotten.
+const useEmail = ref(false)
+
+function toggleEmailLogin() {
+  useEmail.value = !useEmail.value
+  form.identifier = ''
+  errors.identifier = ''
+  formError.value = ''
+}
+
+const identifierInput = ref(null)
 const passwordInput = ref(null)
 
-function onPhoneInput(event) {
-  form.phone = formatPhone(event.target.value)
-  errors.phone = ''
+function onIdentifierInput(event) {
+  form.identifier = event.target.value
+  errors.identifier = ''
   formError.value = ''
 }
 
@@ -30,9 +41,46 @@ function onPasswordInput() {
   formError.value = ''
 }
 
+// "Forgot password": the admin types their username, their private 6-digit PIN and a new password.
+const mode = ref('login') // 'login' | 'forgot'
+const reset = reactive({ username: '', pin: '', next: '', confirm: '' })
+const resetErrors = reactive({ username: '', pin: '', next: '', confirm: '' })
+
 function onForgotPassword() {
   formError.value = ''
-  notice.value = 'Password reset is coming soon. For now, contact your site administrator.'
+  notice.value = ''
+  reset.username = useEmail.value ? '' : form.identifier.trim()
+  mode.value = 'forgot'
+}
+
+function backToLogin() {
+  formError.value = ''
+  Object.assign(reset, { username: '', pin: '', next: '', confirm: '' })
+  Object.assign(resetErrors, { username: '', pin: '', next: '', confirm: '' })
+  mode.value = 'login'
+}
+
+async function onResetSubmit() {
+  if (submitting.value) return
+  formError.value = ''
+  notice.value = ''
+  resetErrors.username = validateUsername(reset.username)
+  resetErrors.pin = validatePin(reset.pin)
+  resetErrors.next = validateNewPassword(reset.next)
+  resetErrors.confirm = reset.next !== reset.confirm ? 'The two passwords do not match.' : ''
+  if (resetErrors.username || resetErrors.pin || resetErrors.next || resetErrors.confirm) return
+
+  submitting.value = true
+  try {
+    await resetPassword(reset.username.trim(), reset.pin.trim(), reset.next)
+    backToLogin()
+    form.password = ''
+    notice.value = 'Password changed. Log in with your new password.'
+  } catch (error) {
+    formError.value = error?.message || 'Something went wrong. Please try again.'
+  } finally {
+    submitting.value = false
+  }
 }
 
 // Go back to the page the admin was trying to open, otherwise the dashboard.
@@ -46,17 +94,17 @@ async function onSubmit() {
   formError.value = ''
   notice.value = ''
 
-  errors.phone = validatePhone(form.phone)
+  errors.identifier = useEmail.value ? validateEmail(form.identifier) : validateUsername(form.identifier)
   errors.password = validatePassword(form.password)
-  if (errors.phone || errors.password) {
+  if (errors.identifier || errors.password) {
     await nextTick()
-    ;(errors.phone ? phoneInput : passwordInput).value?.focus()
+    ;(errors.identifier ? identifierInput : passwordInput).value?.focus()
     return
   }
 
   submitting.value = true
   try {
-    await signIn(form.phone, form.password)
+    await signIn(form.identifier, form.password)
     await router.push(afterLoginTarget())
   } catch (error) {
     formError.value = error?.message || 'Something went wrong. Please try again.'
@@ -73,7 +121,7 @@ async function onSubmit() {
   <main class="login-page">
     <section class="login-card" aria-labelledby="login-title">
       <header class="brand">
-        <span class="brand-mark" aria-hidden="true">R</span>
+        <img class="brand-mark" :src="logoUrl" alt="" width="76" height="76" />
         <div>
           <p class="brand-eyebrow">Admin</p>
           <h1 id="login-title" class="brand-name">Rolaz Cutz</h1>
@@ -83,22 +131,23 @@ async function onSubmit() {
       <p v-if="formError" class="alert" role="alert">{{ formError }}</p>
       <p v-else-if="notice" class="notice" role="status">{{ notice }}</p>
 
-      <form class="login-form" novalidate @submit.prevent="onSubmit">
+      <form v-if="mode === 'login'" class="login-form" novalidate @submit.prevent="onSubmit">
         <div class="field">
-          <label for="phone">Phone number</label>
+          <label for="phone">{{ useEmail ? 'Email address' : 'Username' }}</label>
           <input
             id="phone"
-            ref="phoneInput"
-            :value="form.phone"
-            type="tel"
-            inputmode="tel"
-            autocomplete="username"
-            placeholder="(281) 555-0100"
-            :aria-invalid="errors.phone ? 'true' : 'false'"
-            :aria-describedby="errors.phone ? 'phone-error' : undefined"
-            @input="onPhoneInput"
+            ref="identifierInput"
+            :value="form.identifier"
+            :type="useEmail ? 'email' : 'text'"
+            :autocomplete="useEmail ? 'email' : 'username'"
+            autocapitalize="none"
+            spellcheck="false"
+            :placeholder="useEmail ? 'you@example.com' : 'Your username'"
+            :aria-invalid="errors.identifier ? 'true' : 'false'"
+            :aria-describedby="errors.identifier ? 'identifier-error' : undefined"
+            @input="onIdentifierInput"
           />
-          <p v-if="errors.phone" id="phone-error" class="field-error">{{ errors.phone }}</p>
+          <p v-if="errors.identifier" id="identifier-error" class="field-error">{{ errors.identifier }}</p>
         </div>
 
         <div class="field">
@@ -132,12 +181,84 @@ async function onSubmit() {
         </button>
 
         <button type="button" class="link" @click="onForgotPassword">Forgot password?</button>
+        <button type="button" class="link" @click="toggleEmailLogin">
+          {{ useEmail ? 'Sign in with my username instead' : 'Forgot your username? Sign in with email' }}
+        </button>
+      </form>
+
+      <form v-else class="login-form" novalidate @submit.prevent="onResetSubmit">
+        <h2 class="reset-title">Forgot password</h2>
+        <p class="reset-help">Enter your username and your private 6-digit PIN, then choose a new password. Don't have a PIN? Ask the shop owner to set one for you.</p>
+
+        <div class="field">
+          <label for="reset-username">Username</label>
+          <input
+            id="reset-username"
+            v-model="reset.username"
+            type="text"
+            autocomplete="username"
+            autocapitalize="none"
+            spellcheck="false"
+            :aria-invalid="resetErrors.username ? 'true' : 'false'"
+            @input="resetErrors.username = ''"
+          />
+          <p v-if="resetErrors.username" class="field-error">{{ resetErrors.username }}</p>
+        </div>
+
+        <div class="field">
+          <label for="reset-pin">6-digit PIN</label>
+          <input
+            id="reset-pin"
+            v-model="reset.pin"
+            :type="showPassword ? 'text' : 'password'"
+            inputmode="numeric"
+            autocomplete="off"
+            maxlength="6"
+            :aria-invalid="resetErrors.pin ? 'true' : 'false'"
+            @input="resetErrors.pin = ''"
+          />
+          <p v-if="resetErrors.pin" class="field-error">{{ resetErrors.pin }}</p>
+        </div>
+
+        <div class="field">
+          <label for="reset-new">New password</label>
+          <input
+            id="reset-new"
+            v-model="reset.next"
+            :type="showPassword ? 'text' : 'password'"
+            autocomplete="new-password"
+            :aria-invalid="resetErrors.next ? 'true' : 'false'"
+            @input="resetErrors.next = ''"
+          />
+          <p v-if="resetErrors.next" class="field-error">{{ resetErrors.next }}</p>
+        </div>
+
+        <div class="field">
+          <label for="reset-confirm">Confirm new password</label>
+          <input
+            id="reset-confirm"
+            v-model="reset.confirm"
+            :type="showPassword ? 'text' : 'password'"
+            autocomplete="new-password"
+            :aria-invalid="resetErrors.confirm ? 'true' : 'false'"
+            @input="resetErrors.confirm = ''"
+          />
+          <p v-if="resetErrors.confirm" class="field-error">{{ resetErrors.confirm }}</p>
+        </div>
+
+        <label class="show-all"><input v-model="showPassword" type="checkbox" /> Show PIN and passwords</label>
+
+        <button type="submit" class="submit" :disabled="submitting">
+          {{ submitting ? 'Saving…' : 'Save new password' }}
+        </button>
+        <button type="button" class="link" @click="backToLogin">Back to log in</button>
       </form>
 
       <p class="footnote">Admin access only.</p>
 
       <p v-if="USE_MOCK_AUTH" class="demo">
-        Demo mode: {{ formatPhone(MOCK_CREDENTIALS.phone) }} / {{ MOCK_CREDENTIALS.password }}
+        Demo mode: {{ MOCK_CREDENTIALS.username }} / {{ MOCK_CREDENTIALS.password }}
+        (forgot password: PIN {{ MOCK_RESET_PIN }})
       </p>
     </section>
   </main>
@@ -170,15 +291,9 @@ async function onSubmit() {
 }
 
 .brand-mark {
-  display: grid;
-  place-items: center;
-  width: 52px;
-  height: 52px;
-  border-radius: 10px;
-  background: var(--rc-ink);
-  color: #fff;
-  font-size: 26px;
-  font-weight: 700;
+  width: 76px;
+  height: 76px;
+  object-fit: contain;
 }
 
 .brand-eyebrow {
@@ -190,9 +305,14 @@ async function onSubmit() {
   color: var(--rc-red);
 }
 
+/* Same bold headline style as the customer site. */
 .brand-name {
   margin: 0;
-  font-size: 26px;
+  font-family: var(--rc-heading);
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   line-height: 1.2;
   color: var(--rc-ink);
 }
@@ -297,7 +417,7 @@ button:focus-visible {
   min-height: 48px;
   border: 0;
   border-radius: 8px;
-  background: var(--rc-red);
+  background: var(--rc-red-dark);
   color: #fff;
   font-size: 16px;
   font-weight: 700;
@@ -305,7 +425,7 @@ button:focus-visible {
 }
 
 .submit:hover:not(:disabled) {
-  background: var(--rc-red-dark);
+  background: #8f001d;
 }
 
 .submit:disabled {
@@ -323,6 +443,29 @@ button:focus-visible {
   font-size: 15px;
   text-decoration: underline;
   cursor: pointer;
+}
+
+.reset-title {
+  margin: 0;
+  font-size: 20px;
+}
+
+.reset-help {
+  margin: 0;
+  color: var(--rc-muted);
+  font-size: 15px;
+}
+
+.show-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+}
+
+.show-all input {
+  width: auto;
+  min-height: 0;
 }
 
 .footnote {
