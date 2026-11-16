@@ -2022,6 +2022,26 @@ def admin_update_service(slug):
     return jsonify(admin_service(load_catalog()[slug])), 200
 
 
+@app.route("/api/services/<slug>", methods=["DELETE"])
+@require_admin
+def admin_delete_service(slug):
+    """Delete a service that has never been booked. Booked ones must be hidden (active: false)."""
+    rows = read("SELECT service_id FROM Service WHERE slug = %s", (slug,))
+    if not rows:
+        raise ApiError(404, "Service not found.")
+    service_id = rows[0]["service_id"]
+    if read("SELECT 1 FROM Appointment_Service WHERE service_id = %s LIMIT 1", (service_id,)):
+        raise ApiError(409, "This has been booked before, so it cannot be deleted. Hide it instead.")
+    try:
+        # Upgrade compatibility rows are removed by ON DELETE CASCADE.
+        write("DELETE FROM Service WHERE service_id = %s", (service_id,))
+    except Error as error:
+        if getattr(error, "errno", None) == 1451:  # still referenced (e.g. booked meanwhile)
+            raise ApiError(409, "This has been booked before, so it cannot be deleted. Hide it instead.")
+        raise
+    return "", 204
+
+
 # ---------------------------------------------------------------------------
 # Staff time off and weekly hours (admin). Times in requests are shop-local.
 # ---------------------------------------------------------------------------
@@ -2067,6 +2087,18 @@ def create_day_off(staff_id):
         (staff_id, start, end),
     )
     return jsonify({"message": "Time off added successfully."}), 201
+
+
+@app.route("/api/staff/<int:staff_id>/time-off/<int:slot_id>", methods=["DELETE"])
+@require_admin
+def delete_day_off(staff_id, slot_id):
+    count, _ = write(
+        "DELETE FROM Time_Slot WHERE slot_id = %s AND staff_id = %s AND is_blocked = 1",
+        (slot_id, staff_id),
+    )
+    if count == 0:
+        raise ApiError(404, "Time off not found.")
+    return "", 204
 
 
 @app.route("/api/staff/<int:staff_id>/weekly-hours", methods=["PUT"])

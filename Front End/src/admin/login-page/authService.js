@@ -86,6 +86,21 @@ async function apiLogin(identifier, password) {
   return { token: data.token, user: data.user }
 }
 
+// Ends the session on the server: POST /api/auth/logout with the bearer token -> 204.
+// Never throws: the admin is signed out in the browser whatever the server says.
+export async function logout(token) {
+  if (USE_MOCK_AUTH || !token) return
+  try {
+    await fetch(`${API_URL}/api/auth/logout`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      keepalive: true, // still sent if the page navigates away
+    })
+  } catch {
+    // offline or server down: the token simply expires on its own
+  }
+}
+
 // identifier is the username, or the email address. Resolves to { token, user }.
 export function login(identifier, password) {
   const name = String(identifier ?? '').trim()
