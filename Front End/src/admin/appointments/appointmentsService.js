@@ -74,6 +74,26 @@ export async function createAppointment(fields) {
   })
 }
 
+// Reference photos the customer attached. GET /api/appointments/:id/photos
+//   -> { photos: [{ id, url, uploadedAt }] }. Each url is a signed link that stops
+//   working after about 15 minutes, so load photos when the appointment is opened.
+export async function listAppointmentPhotos(id, count = 0) {
+  if (USE_MOCK_API) {
+    await wait(200)
+    return Array.from({ length: count }, (_, i) => ({
+      id: `demo-${i + 1}`,
+      url:
+        'data:image/svg+xml;utf8,' +
+        encodeURIComponent(
+          `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><rect width="400" height="400" fill="#ddd"/><text x="200" y="210" font-family="sans-serif" font-size="32" text-anchor="middle" fill="#555">Demo photo ${i + 1}</text></svg>`,
+        ),
+      uploadedAt: new Date().toISOString(),
+    }))
+  }
+  const data = await apiRequest(`/api/appointments/${encodeURIComponent(id)}/photos`)
+  return Array.isArray(data?.photos) ? data.photos : []
+}
+
 export async function cancelAppointment(id) {
   if (USE_MOCK_API) {
     await wait(400)

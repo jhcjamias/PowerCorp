@@ -50,7 +50,7 @@ function createCore({ fetchImpl = async () => { throw new Error('fetch was not s
   const context = vm.createContext({
     window: { ROLAZ_CUSTOMER_CONFIG: config }, sessionStorage, fetch: fetchImpl,
     setTimeout, clearTimeout, Intl, Date: ContextDate, JSON, Promise, Error, TypeError,
-    Number, String, Array, Object, RegExp, Map, Set, URLSearchParams,
+    Number, String, Array, Object, RegExp, Map, Set, URLSearchParams, FormData,
   });
   new vm.Script(app.slice(0, end + marker.length), { filename: 'app.js' }).runInContext(context);
   return { core: context.window.RolazCustomerCore, sessionStorage, context };
@@ -436,6 +436,8 @@ test('the customer API contract documents every frontend endpoint and admin mapp
     ['GET', '/api/customer/profile'], ['PATCH', '/api/customer/profile'],
     ['GET', '/api/customer/appointments'], ['POST', '/api/customer/appointments'],
     ['PATCH', '/api/customer/appointments/:id'],
+    ['GET', '/api/customer/appointments/:id/photos'], ['POST', '/api/customer/appointments/:id/photos'],
+    ['DELETE', '/api/customer/appointments/:id/photos/:photoId'],
   ]) {
     assert.equal(contract.includes(`${method} \`${endpoint}\``), true, `${method} ${endpoint} should be documented`);
   }
@@ -581,4 +583,66 @@ test('the test suite is self-contained inside an extracted deliverable', () => {
   const suiteBeforeSelfCheck = fs.readFileSync(__filename, 'utf8').split("test('the test suite is self-contained")[0];
   assert.doesNotMatch(app, /PowerCorp-Daniel-1-source/);
   assert.doesNotMatch(suiteBeforeSelfCheck, /sourceRoot|PowerCorp-Daniel-1-source/);
+});
+
+test('reference photo selection enforces the back end limits before booking', () => {
+  const { core } = createCore();
+  const photo = (name, type = 'image/jpeg', size = 1000) => ({ name, type, size });
+  assert.deepEqual(JSON.parse(JSON.stringify(core.validatePhotoSelection([]))), { files: [], error: '' });
+  assert.equal(core.validatePhotoSelection([photo('empty.jpg', 'image/jpeg', 0)]).files.length, 0, 'an empty file input is ignored');
+  assert.equal(core.validatePhotoSelection([photo('a.jpg'), photo('b.png', 'image/png'), photo('c.webp', 'image/webp')]).files.length, 3);
+  assert.match(core.validatePhotoSelection([photo('a'), photo('b'), photo('c'), photo('d')]).error, /up to 3/);
+  assert.match(core.validatePhotoSelection([photo('cut.heic', 'image/heic')]).error, /cut\.heic isn't a JPEG, PNG, or WebP/);
+  assert.match(core.validatePhotoSelection([photo('big.jpg', 'image/jpeg', core.PHOTO_MAX_BYTES + 1)]).error, /larger than 8 MB/);
+});
+
+test('photo uploads keep the booking when one photo fails and pass the guest token', async () => {
+  const { core } = createCore();
+  const calls = [];
+  const api = {
+    uploadPhoto: async (request) => {
+      calls.push(request);
+      if (request.file.name === 'bad.jpg') throw new Error('Photo storage is down.');
+      return { photos: [] };
+    },
+  };
+  const appointment = { id: '42', guestToken: 'guest-secret' };
+  const result = await core.uploadReferencePhotos(api, appointment, [{ name: 'good.jpg' }, { name: 'bad.jpg' }]);
+  assert.equal(result.uploaded, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.failed)), [{ name: 'bad.jpg', message: 'Photo storage is down.' }]);
+  assert.deepEqual(calls.map((call) => [call.id, call.guestToken]), [['42', 'guest-secret'], ['42', 'guest-secret']]);
+});
+
+test('HTTP photo upload sends multipart form data with the guest token header', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 201, headers: { get: () => '' }, text: async () => '{"photos":[]}' };
+  };
+  const { core } = createCore({ fetchImpl, config: { mode: 'http', apiBaseUrl: 'https://api.example.test' } });
+  const file = new File(['jpeg-bytes'], 'fade.jpg', { type: 'image/jpeg' });
+  await core.HttpCustomerApi.uploadPhoto({ id: '7', file, guestToken: 'guest-secret' });
+
+  assert.equal(calls[0].url, 'https://api.example.test/api/customer/appointments/7/photos');
+  assert.equal(calls[0].options.method, 'POST');
+  assert.equal(calls[0].options.credentials, 'include');
+  assert.equal(calls[0].options.body instanceof FormData, true);
+  assert.equal(calls[0].options.body.get('photo').name, 'fade.jpg');
+  assert.equal(calls[0].options.headers['X-Guest-Token'], 'guest-secret');
+  assert.equal('Content-Type' in calls[0].options.headers, false, 'the browser must set the multipart boundary');
+});
+
+test('mock photo uploads count toward the appointment and stop at the limit', async () => {
+  const api = createMockApi();
+  const selection = await firstAvailableSelection(api);
+  const appointment = await api.createAppointment({
+    serviceId: 'regular', upgradeIds: [], ...selection,
+    customer: { name: 'Photo Tester', phone: '8325550100', email: '' },
+    paymentMethod: 'shop', policyAccepted: true,
+  });
+  const photo = { name: 'look.jpg', type: 'image/jpeg', size: 1000 };
+  for (let i = 0; i < 3; i += 1) await api.uploadPhoto({ id: appointment.id, file: photo });
+  await assert.rejects(() => api.uploadPhoto({ id: appointment.id, file: photo }), /up to 3 photos/);
+  const listed = (await api.listAppointments()).find((item) => item.id === appointment.id);
+  assert.equal(listed.referencePhotos, 3);
 });

@@ -1,12 +1,12 @@
 Front End/node_modules
 
 Back End/__pycache__/
-Back End/migrations/
 Back End/tests
 
 
 # Secrets and local environment (never commit)
 Back End/creds_local.py
+Back End/uploads_local/
 .env
 **/.env
 .venv/

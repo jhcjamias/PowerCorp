@@ -349,6 +349,36 @@ Require either the owning customer session or a separate secure guest-management
 
 Return the saved appointment in the same admin shape after create, reschedule, or cancel.
 
+## Reference photos
+
+Customers can attach up to 3 photos of the look they want to a booked appointment. The customer site uploads them one at a time right after the booking is created. A failed upload never undoes the booking; the confirmation page asks the customer to bring that photo instead.
+
+Every photo route uses the same authorization as `PATCH /api/customer/appointments/:id`: the owning customer session, or the guest-management token in an `X-Guest-Token` header. Photos can only be added or removed while the appointment is `Booked` (`409` otherwise).
+
+### POST `/api/customer/appointments/:id/photos`
+
+A `multipart/form-data` body with one file in the field `photo`. Accepted: JPEG, PNG, or WebP up to 8 MB. The server re-encodes every photo as a JPEG at most 2048 pixels on its longest side and drops all metadata, including phone GPS locations.
+
+Responses: `201` with the appointment's photo list (below); `400` for a missing or unreadable file; `409` when the appointment already has 3 photos or is no longer booked; `413` for a file over 8 MB; `415` for another file type; `503` when photo storage is unavailable.
+
+### GET `/api/customer/appointments/:id/photos`
+
+```json
+{
+  "photos": [
+    { "id": "12", "url": "https://...signed link...", "uploadedAt": "2026-11-20T15:04:05Z" }
+  ]
+}
+```
+
+Each `url` is a signed link that works for about 15 minutes. Request the list again instead of saving links.
+
+### DELETE `/api/customer/appointments/:id/photos/:photoId`
+
+Removes one photo and returns `204`.
+
+The appointment's `referencePhotos` count is the number of photos attached. Staff see the photos through `GET /api/appointments/:id/photos`, which returns the same list shape.
+
 ## Admin connection
 
 The supplied admin frontend expects `GET /api/appointments` and `PATCH /api/appointments/:id`. Those routes and the customer routes must read and write the same appointment records. The customer frontend does not call admin routes directly.
