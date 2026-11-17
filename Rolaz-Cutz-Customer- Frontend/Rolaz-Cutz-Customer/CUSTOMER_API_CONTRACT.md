@@ -333,7 +333,13 @@ Completed and Cancelled appointments cannot be rescheduled or cancelled again; r
 
 The booking insert and overlap check must be one transaction. Reject overlap conflicts with `409`.
 
-A guest appointment has no customer account owner. If that phone number later creates an account, do not automatically claim or expose the earlier guest appointment. A separate, verified claim process can be designed later.
+A guest appointment has no customer account owner. When someone signs in or registers with a texted code (`POST /api/customer/auth/verify-code`), the back end attaches guest bookings for that verified phone number to the account, but only bookings that are:
+
+- made on the customer site (they have a guest-management token; bookings staff enter in the admin are never claimed),
+- still `Booked`, and
+- in the future.
+
+Past, cancelled and completed guest bookings stay unowned, so a guest who mistyped a number cannot put their visit history into a stranger's account. A claimed booking's guest-management token keeps working, and its reference photos move with it.
 
 ### PATCH `/api/customer/appointments/:id`
 

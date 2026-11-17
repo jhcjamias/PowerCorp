@@ -187,6 +187,7 @@ CREATE TABLE Appointment (
   PRIMARY KEY (appointment_id),
   UNIQUE KEY uq_appointment_guest_token (guest_token_hash),
   KEY customer_id (customer_id),
+  KEY idx_appointment_customer_phone (customer_phone),
   KEY idx_appointment_staff_time (staff_id, start_time, end_time),
   CONSTRAINT fk_appointment_customer FOREIGN KEY (customer_id) REFERENCES Customer (customer_id),
   CONSTRAINT fk_appointment_staff FOREIGN KEY (staff_id) REFERENCES Staff (staff_id),

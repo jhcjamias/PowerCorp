@@ -1322,18 +1322,21 @@ def customer_verify_code():
             (now, customer["customer_id"]),
         )
 
-    # Link any guest appointments booked with this verified phone number.
+    # Link upcoming guest bookings made on the customer site with this verified
+    # phone. Only rows with a guest token count: staff-entered bookings have none
+    # and stay with the shop. Past and cancelled bookings are left alone, so a
+    # mistyped number can't put someone else's visit history in this account.
     write(
         """
         UPDATE Appointment
         SET customer_id = %s
         WHERE customer_id IS NULL
+          AND guest_token_hash IS NOT NULL
+          AND status = 'booked'
+          AND start_time > %s
           AND customer_phone = %s
         """,
-        (
-            customer["customer_id"],
-            phone,
-        ),
+        (customer["customer_id"], now, phone),
     )
 
     response = jsonify({"authenticated": True, "customer": customer_profile(customer)})
