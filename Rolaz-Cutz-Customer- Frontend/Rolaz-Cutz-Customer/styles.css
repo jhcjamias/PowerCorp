@@ -366,6 +366,9 @@ h3 { font-size: clamp(1.5rem, 2.3vw, 2.4rem); margin-bottom: 15px; }
 .policy-reminder { margin: 22px 0; padding: 18px 20px; display: flex; align-items: flex-start; gap: 16px; border: 1px solid var(--signal-red); text-align: left; font-size: 11px; line-height: 1.6; }
 .policy-reminder strong { min-width: 190px; text-transform: uppercase; }
 .policy-reminder a { color: var(--red-dark); font-weight: 900; text-decoration: underline; }
+.guest-code { margin: 22px 0; padding: 18px 20px; display: grid; gap: 8px; border: 1px solid var(--line-light); text-align: left; font-size: 11px; line-height: 1.6; }
+.guest-code small { font-weight: 900; letter-spacing: .08em; }
+.guest-code code { font-size: 13px; overflow-wrap: anywhere; user-select: all; }
 
 .profile-grid { display: grid; grid-template-columns: minmax(265px, 330px) minmax(0, 1fr); gap: clamp(32px, 5vw, 68px); }
 .profile-card { padding: 27px; align-self: start; background: var(--black); color: var(--paper); border-top: 7px solid var(--signal-red); }

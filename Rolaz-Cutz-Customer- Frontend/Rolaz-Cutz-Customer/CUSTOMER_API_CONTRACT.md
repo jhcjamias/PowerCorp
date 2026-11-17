@@ -333,7 +333,13 @@ Completed and Cancelled appointments cannot be rescheduled or cancelled again; r
 
 The booking insert and overlap check must be one transaction. Reject overlap conflicts with `409`.
 
-A guest appointment has no customer account owner. If that phone number later creates an account, do not automatically claim or expose the earlier guest appointment. A separate, verified claim process can be designed later.
+A guest appointment has no customer account owner. When someone signs in or registers with a texted code (`POST /api/customer/auth/verify-code`), the back end attaches guest bookings for that verified phone number to the account, but only bookings that are:
+
+- made on the customer site (they have a guest-management token; bookings staff enter in the admin are never claimed),
+- still `Booked`, and
+- in the future.
+
+Past, cancelled and completed guest bookings stay unowned, so a guest who mistyped a number cannot put their visit history into a stranger's account. A claimed booking's guest-management token keeps working, and its reference photos move with it.
 
 ### PATCH `/api/customer/appointments/:id`
 
@@ -348,6 +354,74 @@ Cancellation sends:
 Require either the owning customer session or a separate secure guest-management token. Never authorize appointment changes by a public appointment ID alone.
 
 Return the saved appointment in the same admin shape after create, reschedule, or cancel.
+
+## Online payment (Stripe Checkout)
+
+Customers can pay by card before the visit instead of paying at the shop. The card form is Stripe's hosted page; card details never touch this site or the API. The back end needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and `SITE_URL`; without the key the endpoint answers `503` and Pay at Shop keeps working.
+
+### POST `/api/customer/stripe/checkout`
+
+The same body as `POST /api/customer/appointments`, with `"payment": "Stripe"` and `"paymentMethod": "stripe"`. Not used for rescheduling (`replacesId` is rejected with `400`). The API recalculates prices from the catalog, books the time with `payment: "Awaiting payment"`, and answers `201`:
+
+```json
+{ "checkoutUrl": "https://checkout.stripe.com/c/pay/cs_test_...", "sessionId": "cs_test_...", "appointmentId": "41", "guestToken": "shown-once-for-guests" }
+```
+
+The site uploads any reference photos to `appointmentId`, saves `sessionId`, `appointmentId` and `guestToken` in `sessionStorage`, and sends the browser to `checkoutUrl`. An unpaid booking holds its time for 30 minutes; then Stripe expires the page and the time is released (`status: "Cancelled"`, `payment: "Expired"`).
+
+Stripe sends the customer back to `SITE_URL/?checkout=success&session_id=...#payment-success` or `SITE_URL/?checkout=cancel#payment-cancel`. The cancel page cancels the held booking straight away.
+
+### GET `/api/customer/stripe/checkout/:sessionId`
+
+Returns the booking in the admin shape for the payment return page. Requires the owning customer session or the `X-Guest-Token` header (`401`/`403` otherwise, `404` for an unknown session). If the webhook hasn't arrived yet, the API asks Stripe directly, so a finished payment shows `payment: "Paid"`.
+
+### POST `/api/stripe/webhook`
+
+Called by Stripe only, signed with `STRIPE_WEBHOOK_SECRET` (bad signature: `400`). Events: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired`, `charge.refunded`. A payment is recorded only when the amount and currency match the booking's stored lines.
+
+### Payment states and refunds
+
+| `paymentMethod` | `payment` | Meaning |
+|---|---|---|
+| `Online card` | `Awaiting payment` | Booked, held for 30 minutes while the customer pays |
+| `Online card` | `Paid` | Stripe confirmed the charge |
+| `Online card` | `Refunded` / `Partially refunded` | Money returned (by cancelling, or in the Stripe dashboard) |
+| `Online card` | `Expired` / `Cancelled` / `Payment failed` / `Checkout failed` | Never paid; the time was released |
+
+- `status` stays `Booked`, `Completed`, `No-show` or `Cancelled`, so the admin pages work unchanged.
+- Cancelling a paid booking refunds it in full. Customers can cancel a prepaid booking online until **2 hours** before it starts (`409` inside that window: call the shop). Staff can cancel and refund at any time. `Completed` and `No-show` keep the payment.
+- If the refund fails, the booking is not cancelled (`502`), so nothing is cancelled without the money going back.
+- A prepaid booking can move to another time but can't change its services online (`409`); it keeps the prices that were paid.
+
+## Reference photos
+
+Customers can attach up to 3 photos of the look they want to a booked appointment. The customer site uploads them one at a time right after the booking is created. A failed upload never undoes the booking; the confirmation page asks the customer to bring that photo instead.
+
+Every photo route uses the same authorization as `PATCH /api/customer/appointments/:id`: the owning customer session, or the guest-management token in an `X-Guest-Token` header. Photos can only be added or removed while the appointment is `Booked` (`409` otherwise).
+
+### POST `/api/customer/appointments/:id/photos`
+
+A `multipart/form-data` body with one file in the field `photo`. Accepted: JPEG, PNG, or WebP up to 8 MB. The server re-encodes every photo as a JPEG at most 2048 pixels on its longest side and drops all metadata, including phone GPS locations.
+
+Responses: `201` with the appointment's photo list (below); `400` for a missing or unreadable file; `409` when the appointment already has 3 photos or is no longer booked; `413` for a file over 8 MB; `415` for another file type; `503` when photo storage is unavailable.
+
+### GET `/api/customer/appointments/:id/photos`
+
+```json
+{
+  "photos": [
+    { "id": "12", "url": "https://...signed link...", "uploadedAt": "2026-11-20T15:04:05Z" }
+  ]
+}
+```
+
+Each `url` is a signed link that works for about 15 minutes. Request the list again instead of saving links.
+
+### DELETE `/api/customer/appointments/:id/photos/:photoId`
+
+Removes one photo and returns `204`.
+
+The appointment's `referencePhotos` count is the number of photos attached. Staff see the photos through `GET /api/appointments/:id/photos`, which returns the same list shape.
 
 ## Admin connection
 

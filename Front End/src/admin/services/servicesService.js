@@ -79,10 +79,14 @@ export async function deleteService(id) {
     await apiRequest(`/api/services/${encodeURIComponent(id)}`, { method: 'DELETE' })
   } catch (error) {
     if (error instanceof ApiError && error.status === 409) {
-      throw new Error('This has been booked before, so it cannot be deleted. Hide it instead.')
+      throw new Error('This has been booked before, so it cannot be deleted. Hide it instead.', {
+        cause: error,
+      })
     }
     if (error instanceof ApiError && [404, 405].includes(error.status)) {
-      throw new Error('Delete is not available on the server yet. Hide it for now.')
+      throw new Error('Delete is not available on the server yet. Hide it for now.', {
+        cause: error,
+      })
     }
     throw error
   }

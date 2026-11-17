@@ -16,7 +16,8 @@
 //   404/405 -> the back end does not have this route yet
 
 const API_URL = (import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:5000').replace(/\/$/, '')
-export const USE_MOCK_AUTH = import.meta.env.VITE_USE_MOCK_AUTH !== 'false'
+// A production build ("npm run build") never allows the demo login, whatever the env file says.
+export const USE_MOCK_AUTH = !import.meta.env.PROD && import.meta.env.VITE_USE_MOCK_AUTH !== 'false'
 
 // Demo login that only works in mock mode. Remove once the real API is connected.
 export const MOCK_CREDENTIALS = { username: 'rolaz', email: 'rolazcutz@gmail.com', password: 'rolaz-admin' }

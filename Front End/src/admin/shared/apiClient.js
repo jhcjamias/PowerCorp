@@ -8,7 +8,8 @@
 import { useAuth } from '@/admin/login-page/useAuth'
 
 export const API_URL = (import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:5000').replace(/\/$/, '')
-export const USE_MOCK_API = import.meta.env.VITE_USE_MOCK_API !== 'false'
+// A production build ("npm run build") never uses demo data, whatever the env file says.
+export const USE_MOCK_API = !import.meta.env.PROD && import.meta.env.VITE_USE_MOCK_API !== 'false'
 
 export class ApiError extends Error {
   constructor(status, message) {

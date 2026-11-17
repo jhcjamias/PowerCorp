@@ -21,6 +21,12 @@ Environment variables (all optional in development):
     POLICY_VERSION          current Appointment & Payment Policy version
     BARBER_STAFF_ID         Staff row that owns the single chair
     TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_VERIFY_SERVICE_SID
+    UPLOADS_BUCKET          private S3 bucket for reference photos (development without it
+                            saves photos in Back End/uploads_local/)
+    AWS_REGION              region of UPLOADS_BUCKET (default us-east-1)
+    STRIPE_SECRET_KEY       Stripe secret key (sk_test_... or sk_live_...); enables online payment
+    STRIPE_WEBHOOK_SECRET   signing secret (whsec_...) of the /api/stripe/webhook endpoint
+    SITE_URL                customer site address Stripe returns to, e.g. https://rolazcutzbarbershop.com
     GOOGLE_PLACES_API_KEY / GOOGLE_PLACE_ID / GOOGLE_REVIEWS_URL
     INSTAGRAM_ACCESS_TOKEN
 """
@@ -28,6 +34,7 @@ Environment variables (all optional in development):
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -38,16 +45,22 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from functools import wraps
 from zoneinfo import ZoneInfo
 
+import boto3
 import flask
+import stripe
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import BotoCoreError, ClientError
 from flask import g, jsonify, request
 from flask_cors import CORS
 from mysql.connector import Error
+from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -132,8 +145,33 @@ GOOGLE_REVIEWS_URL = os.getenv(
     "https://www.google.com/maps/search/?api=1&query=Rolaz%20Cutz%20Barbershop%20Katy%20TX",
 )
 INSTAGRAM_PROFILE_URL = "https://www.instagram.com/rolaz_cutz/"
+
+# Reference photos customers attach to a booking. Production stores them in a
+# private S3 bucket; the browser only ever gets short-lived signed links.
+UPLOADS_BUCKET = os.getenv("UPLOADS_BUCKET", "").strip()
+UPLOADS_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
+LOCAL_UPLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads_local")
+MAX_PHOTOS_PER_APPOINTMENT = 3
+MAX_PHOTO_BYTES = 8 * 1024 * 1024
+PHOTO_MAX_EDGE = 2048            # longest side after resizing, in pixels
+PHOTO_URL_SECONDS = 15 * 60      # how long a signed photo link works
+ALLOWED_PHOTO_FORMATS = {"JPEG", "PNG", "WEBP"}
+PHOTO_KEY_PATTERN = re.compile(r"appointments/\d+/[0-9a-f]{32}\.jpg")
+Image.MAX_IMAGE_PIXELS = 40_000_000  # refuse "decompression bomb" images early
+
 PROVIDER_CACHE_SECONDS = 15 * 60
 PROVIDER_FAILURE_CACHE_SECONDS = 60
+
+# Online card payments through Stripe Checkout. Without STRIPE_SECRET_KEY the
+# "Pay online" option answers 503 and Pay at Shop keeps working.
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+# Where Stripe sends the customer back, e.g. https://rolazcutzbarbershop.com.
+# When unset, the approved Origin of the checkout request is used instead.
+SITE_URL = os.getenv("SITE_URL", "").strip().rstrip("/")
+STRIPE_CHECKOUT_SECONDS = 30 * 60  # how long an unpaid online booking holds its time
+PREPAID_CANCEL_CUTOFF = timedelta(hours=2)  # the policy's cancellation window
+PAYMENT_METHOD_LABELS = {"stripe": "Online card"}
 
 DEFAULT_ORIGINS = [
     "http://localhost:5173", "http://127.0.0.1:5173",   # admin (Vite)
@@ -156,6 +194,8 @@ if "*" in ALLOWED_ORIGINS:
 app = flask.Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 app.config["DEBUG"] = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+# Largest request body accepted (one photo plus form overhead). Bigger requests get a 413.
+app.config["MAX_CONTENT_LENGTH"] = MAX_PHOTO_BYTES + 1024 * 1024
 
 proxy_hops = int(os.getenv("TRUST_PROXY_HOPS", "0"))
 if proxy_hops > 0:
@@ -172,6 +212,12 @@ DB_SETTINGS = (
     os.getenv("DB_NAME") or my_creds.dbName,
     int(os.getenv("DB_PORT", "3306")),
 )
+if not all(DB_SETTINGS[:4]):
+    message = ("Database settings are missing. Set DB_HOST, DB_USER, DB_PASSWORD and DB_NAME, "
+               "or create Back End/creds_local.py for local development.")
+    if IS_PRODUCTION:
+        raise RuntimeError(message)
+    logger.warning(message)
 
 
 class ApiError(Exception):
@@ -471,6 +517,7 @@ def handle_http_error(error):
     messages = {
         404: "That endpoint or record was not found.",
         405: "That HTTP method is not allowed for this endpoint.",
+        413: f"That file is too large. Photos must be {MAX_PHOTO_BYTES // (1024 * 1024)} MB or smaller.",
     }
     return jsonify({"message": messages.get(error.code, error.description)}), error.code
 
@@ -920,9 +967,11 @@ def appointment_json(row, audience):
             }
             for line in row["lines"]
         ],
+        # An unpaid online booking is still "Booked" (it holds its time), and
+        # "payment" says "Awaiting payment" until Stripe confirms the charge.
         "status": STATUS_TO_API.get(row["status"], row["status"]),
         "payment": row["payment_status"],
-        "paymentMethod": row["payment_method"],
+        "paymentMethod": PAYMENT_METHOD_LABELS.get(row["payment_method"], row["payment_method"]),
         "receiptSent": bool(row["receipt_sent"]),
         "referencePhotos": int(row["reference_photos"] or 0),
         "notes": row["notes"] or "",
@@ -1290,6 +1339,23 @@ def customer_verify_code():
             (now, customer["customer_id"]),
         )
 
+    # Link upcoming guest bookings made on the customer site with this verified
+    # phone. Only rows with a guest token count: staff-entered bookings have none
+    # and stay with the shop. Past and cancelled bookings are left alone, so a
+    # mistyped number can't put someone else's visit history in this account.
+    write(
+        """
+        UPDATE Appointment
+        SET customer_id = %s
+        WHERE customer_id IS NULL
+          AND guest_token_hash IS NOT NULL
+          AND status = 'booked'
+          AND start_time > %s
+          AND customer_phone = %s
+        """,
+        (customer["customer_id"], now, phone),
+    )
+
     response = jsonify({"authenticated": True, "customer": customer_profile(customer)})
     start_customer_session(response, customer["customer_id"])
     return response, 200
@@ -1400,12 +1466,15 @@ def check_policy(data):
         raise ApiError(400, "Please review and accept the current Appointment & Payment Policy.")
 
 
-def check_snapshot_extras(data):
+def check_snapshot_extras(data, online=False):
     """Validate the admin-shape fields the browser sends but cannot control."""
     if data.get("status", "Booked") != "Booked":
         raise ApiError(400, "New appointments must have status Booked.")
-    if data.get("payment", "Pay at Shop") != "Pay at Shop" or data.get("paymentMethod", "shop") != "shop":
-        raise ApiError(400, "Online payment is not available yet. Please choose Pay at Shop.")
+    if online:
+        if data.get("payment", "Stripe") != "Stripe" or data.get("paymentMethod", "stripe") != "stripe":
+            raise ApiError(400, "Online checkout only takes card payment through Stripe.")
+    elif data.get("payment", "Pay at Shop") != "Pay at Shop" or data.get("paymentMethod", "shop") != "shop":
+        raise ApiError(400, "To pay online, use the Pay Online option. Otherwise choose Pay at Shop.")
     if "receiptSent" in data and not isinstance(data["receiptSent"], bool):
         raise ApiError(400, "receiptSent must be true or false.")
     photos = data.get("referencePhotos", 0)
@@ -1423,11 +1492,13 @@ def list_customer_appointments():
     return jsonify([appointment_json(row, "customer") for row in rows]), 200
 
 
-@app.route("/api/customer/appointments", methods=["POST"])
-def create_customer_appointment():
-    data = json_body()
+def customer_booking_request(data, online=False):
+    """
+    Validate a customer booking request (Pay at Shop or online checkout).
+    Prices always come from the catalog, never from the browser.
+    """
     check_policy(data)
-    check_snapshot_extras(data)
+    check_snapshot_extras(data, online=online)
     day = parse_date(data.get("date"))
     minute = parse_hhmm(data.get("time"))
     if day <= shop_today():
@@ -1438,29 +1509,48 @@ def create_customer_appointment():
     account = current_customer()
     if account:
         # A signed-in booking belongs to the account and uses its verified phone.
-        customer_id = account["customer_id"]
         profile = customer_profile(account)
-        name = validate_name(snapshot["name"]) if snapshot.get("name") else profile["name"]
-        email = validate_optional_email(snapshot.get("email")) or (account["email"] or None)
-        phone = profile["phone"]
-        guest_token = None
+        booking = {
+            "customer_id": account["customer_id"],
+            "name": validate_name(snapshot["name"]) if snapshot.get("name") else profile["name"],
+            "email": validate_optional_email(snapshot.get("email")) or (account["email"] or None),
+            "phone": profile["phone"],
+            "guest_token": None,
+        }
     else:
         # Guest booking: no owner. A management token authorizes later changes.
-        customer_id = None
-        name = validate_name(snapshot.get("name"))
-        phone = normalize_phone(snapshot.get("phone"))
-        email = validate_optional_email(snapshot.get("email"))
-        guest_token = secrets.token_urlsafe(32)
+        booking = {
+            "customer_id": None,
+            "name": validate_name(snapshot.get("name")),
+            "phone": normalize_phone(snapshot.get("phone")),
+            "email": validate_optional_email(snapshot.get("email")),
+            "guest_token": secrets.token_urlsafe(32),
+        }
+    booking.update(
+        day=day, minute=minute, notes=notes,
+        quote=quote_from_snapshot(load_catalog(), data.get("services")),
+    )
+    return booking
 
-    quote = quote_from_snapshot(load_catalog(), data.get("services"))
-    appointment_id = insert_appointment(
-        staff_id=barber_staff_id(), quote=quote, day=day, minute=minute,
-        customer_id=customer_id, name=name, phone=phone, email=email, notes=notes,
-        payment_status="Pay at Shop", payment_method="shop",
+
+def insert_customer_booking(booking, payment_status, payment_method):
+    guest_token = booking["guest_token"]
+    return insert_appointment(
+        staff_id=barber_staff_id(), quote=booking["quote"], day=booking["day"],
+        minute=booking["minute"], customer_id=booking["customer_id"], name=booking["name"],
+        phone=booking["phone"], email=booking["email"], notes=booking["notes"],
+        payment_status=payment_status, payment_method=payment_method,
         policy_version=POLICY_VERSION,
         guest_token_hash=sha256_hex(guest_token) if guest_token else None,
         staff_booking=False,
     )
+
+
+@app.route("/api/customer/appointments", methods=["POST"])
+def create_customer_appointment():
+    booking = customer_booking_request(json_body())
+    guest_token = booking["guest_token"]
+    appointment_id = insert_customer_booking(booking, "Pay at Shop", "shop")
 
     result = appointment_json(fetch_appointment(appointment_id), "customer")
     if guest_token:
@@ -1505,7 +1595,7 @@ def update_customer_appointment(appointment_id):
         current = fetch_appointment(appointment_id)
         if current["status"] == "booked" and current["start_time"] <= utc_now():
             raise ApiError(409, "This appointment has already started and can no longer be cancelled online.")
-        set_status(appointment_id, "canceled")
+        cancel_appointment(appointment_id, by_customer=True)
     elif status in (None, "Booked") and wants_move:
         day = parse_date(data.get("date"))
         minute = parse_hhmm(data.get("time"))
@@ -1514,6 +1604,7 @@ def update_customer_appointment(appointment_id):
         quote = None
         if "services" in data:
             quote = quote_from_snapshot(load_catalog(), data["services"])
+            quote = keep_prepaid_services(appointment_id, quote)
         notes = validate_notes(data["notes"]) if "notes" in data else None
         reschedule(appointment_id, day, minute, quote=quote, notes=notes)
     elif status in ("Completed", "No-show"):
@@ -1522,6 +1613,531 @@ def update_customer_appointment(appointment_id):
         raise ApiError(400, "Send a new date and time to reschedule, or status Cancelled to cancel.")
 
     return jsonify(appointment_json(fetch_appointment(appointment_id), "customer")), 200
+
+
+# ---------------------------------------------------------------------------
+# Online payment (Stripe Checkout)
+# ---------------------------------------------------------------------------
+# 1. POST /api/customer/stripe/checkout books the time with payment
+#    "Awaiting payment" and returns a Stripe-hosted payment page.
+# 2. Stripe's signed webhook, or the customer's return to the site, records
+#    the result: "Paid", or the hold is released ("Expired", "Payment failed").
+# 3. Cancelling a paid booking refunds it in full ("Refunded"). Customers can
+#    cancel a prepaid booking online until 2 hours before it starts; inside that
+#    window they call the shop and staff decide. Completed and No-show keep it.
+# The amount is always checked against the stored appointment lines.
+
+AWAITING_PAYMENT = "Awaiting payment"
+
+
+def stripe_client():
+    if not STRIPE_SECRET_KEY:
+        raise ApiError(503, "Online payment is not available right now. Please choose Pay at Shop.")
+    return stripe.StripeClient(STRIPE_SECRET_KEY, max_network_retries=2)
+
+
+# The four Stripe calls the app makes. Each returns a plain dict.
+def stripe_create_checkout(params, idempotency_key):
+    session = stripe_client().v1.checkout.sessions.create(
+        params=params, options={"idempotency_key": idempotency_key})
+    return session.to_dict()
+
+
+def stripe_retrieve_checkout(session_id):
+    return stripe_client().v1.checkout.sessions.retrieve(session_id).to_dict()
+
+
+def stripe_expire_checkout(session_id):
+    return stripe_client().v1.checkout.sessions.expire(session_id).to_dict()
+
+
+def stripe_refund(payment_intent_id, appointment_id):
+    refund = stripe_client().v1.refunds.create(
+        params={
+            "payment_intent": payment_intent_id,
+            "reason": "requested_by_customer",
+            "metadata": {"appointment_id": str(appointment_id)},
+        },
+        options={"idempotency_key": f"refund-appointment-{appointment_id}"},
+    )
+    return refund.to_dict()
+
+
+def checkout_return_base():
+    """The customer site address Stripe sends the customer back to."""
+    if SITE_URL:
+        return SITE_URL
+    origin = (request.headers.get("Origin") or "").rstrip("/")
+    if origin and origin in ALLOWED_ORIGINS:
+        return origin
+    raise ApiError(503, "Online payment is not set up yet. Please choose Pay at Shop.")
+
+
+def payment_row(appointment_id):
+    rows = read(
+        """
+        SELECT appointment_id, status, start_time, payment_method, payment_status,
+               stripe_checkout_session_id, stripe_payment_intent_id
+        FROM Appointment WHERE appointment_id = %s
+        """,
+        (appointment_id,),
+    )
+    return rows[0] if rows else None
+
+
+def expected_amount_cents(appointment_id):
+    rows = read(
+        "SELECT COALESCE(SUM(price_cents_at_booking), 0) AS amount "
+        "FROM Appointment_Service WHERE appointment_id = %s",
+        (appointment_id,),
+    )
+    return int(rows[0]["amount"]) if rows else 0
+
+
+def release_unpaid_hold(appointment_id, outcome):
+    """Cancel an online booking that was never paid. Returns True if it did."""
+    count, _ = write(
+        """
+        UPDATE Appointment
+        SET status = 'canceled', payment_status = %s, updated_at = %s
+        WHERE appointment_id = %s AND payment_method = 'stripe'
+          AND payment_status = %s AND status = 'booked'
+        """,
+        (outcome, utc_now(), appointment_id, AWAITING_PAYMENT),
+    )
+    return count > 0
+
+
+def stop_checkout(session_id):
+    """Close a Stripe payment page so a cancelled booking can't be paid."""
+    if not session_id:
+        return
+    try:
+        stripe_expire_checkout(session_id)
+    except Exception:
+        # Already paid or expired. A late payment is refunded by the webhook.
+        logger.warning("Could not expire Stripe Checkout session %s", session_id, exc_info=True)
+
+
+def refund_payment(appointment_id):
+    """Refund a paid online booking in full. Raises if Stripe refuses."""
+    row = payment_row(appointment_id)
+    if not row or row["payment_method"] != "stripe" or row["payment_status"] != "Paid":
+        return
+    if not row["stripe_payment_intent_id"]:
+        raise ApiError(409, "This online payment has no Stripe record to refund. "
+                            "Refund it in the Stripe dashboard, then cancel again.")
+    try:
+        refund = stripe_refund(row["stripe_payment_intent_id"], appointment_id)
+    except ApiError:
+        raise
+    except Exception:
+        logger.exception("Stripe refund failed for appointment %s", appointment_id)
+        refund = None
+    if not refund or refund.get("status") in ("failed", "canceled"):
+        raise ApiError(502, "The refund could not be started, so the appointment was not cancelled. "
+                            "Please try again in a moment.")
+    write(
+        "UPDATE Appointment SET payment_status = 'Refunded', updated_at = %s "
+        "WHERE appointment_id = %s AND payment_status = 'Paid'",
+        (utc_now(), appointment_id),
+    )
+
+
+def cancel_appointment(appointment_id, by_customer):
+    """Cancel a booked appointment, settling any online payment first."""
+    row = payment_row(appointment_id)
+    if row is None:
+        raise ApiError(404, "Appointment not found.")
+    if row["status"] == "booked" and row["payment_method"] == "stripe":
+        if row["payment_status"] == AWAITING_PAYMENT:
+            if release_unpaid_hold(appointment_id, "Cancelled"):
+                stop_checkout(row["stripe_checkout_session_id"])
+                return
+            row = payment_row(appointment_id)  # it was paid a moment ago
+        if row["payment_status"] == "Paid":
+            if by_customer and row["start_time"] - utc_now() < PREPAID_CANCEL_CUTOFF:
+                raise ApiError(409, "Prepaid appointments can be cancelled online until 2 hours "
+                                    f"before they start. Please call the shop at {BUSINESS['phone']}.")
+            refund_payment(appointment_id)
+    set_status(appointment_id, "canceled")  # raises 409 unless still booked
+
+
+def keep_prepaid_services(appointment_id, quote):
+    """A booking paid online keeps the services (and prices) it was paid for."""
+    row = payment_row(appointment_id)
+    if not row or row["payment_method"] != "stripe":
+        return quote
+    current = [line["slug"] for line in fetch_appointment(appointment_id)["lines"]]
+    if [line["slug"] for line in quote["lines"]] != current:
+        raise ApiError(409, "This appointment was paid online, so its services can't be changed online. "
+                            f"Please call the shop at {BUSINESS['phone']}.")
+    return None
+
+
+def apply_checkout_session(session):
+    """Record what a Checkout Session says about its booking. Safe to repeat."""
+    try:
+        appointment_id = int((session.get("metadata") or {}).get("appointment_id", ""))
+    except (TypeError, ValueError):
+        logger.warning("Stripe session %s has no appointment ID", session.get("id"))
+        return
+    row = payment_row(appointment_id)
+    if row is None or row["stripe_checkout_session_id"] != session.get("id"):
+        logger.warning("Stripe session %s does not match appointment %s", session.get("id"), appointment_id)
+        return
+
+    if session.get("status") == "expired":
+        release_unpaid_hold(appointment_id, "Expired")
+        return
+    if session.get("payment_status") != "paid":
+        return  # still open, or a delayed payment method is processing
+
+    expected = expected_amount_cents(appointment_id)
+    if (session.get("currency") or "").lower() != "usd" or session.get("amount_total") != expected:
+        logger.error("Stripe amount mismatch for appointment %s: charged %s %s, expected %s usd",
+                     appointment_id, session.get("amount_total"), session.get("currency"), expected)
+        return
+
+    intent = session.get("payment_intent")
+    if isinstance(intent, dict):
+        intent = intent.get("id")
+    write(
+        """
+        UPDATE Appointment
+        SET payment_status = 'Paid', stripe_payment_intent_id = %s, updated_at = %s
+        WHERE appointment_id = %s AND payment_method = 'stripe'
+          AND payment_status IN (%s, 'Cancelled')
+        """,
+        (intent, utc_now(), appointment_id, AWAITING_PAYMENT),
+    )
+    row = payment_row(appointment_id)
+    if row["status"] == "canceled" and row["payment_status"] == "Paid":
+        # Paid after the booking was cancelled: give the money back.
+        refund_payment(appointment_id)
+
+
+def record_refund(charge):
+    """A refund made in the Stripe dashboard (charge.refunded)."""
+    intent = charge.get("payment_intent")
+    if isinstance(intent, dict):
+        intent = intent.get("id")
+    if not intent:
+        return
+    amount = int(charge.get("amount") or 0)
+    refunded = int(charge.get("amount_refunded") or 0)
+    outcome = "Refunded" if amount > 0 and refunded >= amount else "Partially refunded"
+    write(
+        """
+        UPDATE Appointment SET payment_status = %s, updated_at = %s
+        WHERE stripe_payment_intent_id = %s AND payment_method = 'stripe'
+          AND payment_status IN ('Paid', 'Partially refunded')
+        """,
+        (outcome, utc_now(), intent),
+    )
+
+
+@app.route("/api/customer/stripe/checkout", methods=["POST"])
+def create_customer_stripe_checkout():
+    """Hold the time, then hand the customer a Stripe-hosted payment page."""
+    data = json_body()
+    if data.get("replacesId"):
+        raise ApiError(400, "To reschedule, change the time on your existing appointment.")
+    booking = customer_booking_request(data, online=True)
+    stripe_client()  # 503 before anything is reserved
+    return_base = checkout_return_base()
+    quote = booking["quote"]
+    if quote["price_cents"] <= 0:
+        raise ApiError(400, "There is nothing to pay online for this booking. Please choose Pay at Shop.")
+
+    appointment_id = insert_customer_booking(booking, AWAITING_PAYMENT, "stripe")
+    reference = {"appointment_id": str(appointment_id)}
+    params = {
+        # Payment methods (card, Apple Pay, ...) are chosen in the Stripe
+        # Dashboard; Stripe no longer accepts payment_method_types here.
+        "mode": "payment",
+        "expires_at": int(time.time()) + STRIPE_CHECKOUT_SECONDS,
+        "client_reference_id": str(appointment_id),
+        "metadata": reference,
+        "payment_intent_data": {
+            "metadata": reference,
+            "description": f"Rolaz Cutz appointment {appointment_id}",
+        },
+        "line_items": [
+            {
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": line["name"]},
+                    "unit_amount": int(line["price_cents"]),
+                },
+                "quantity": 1,
+            }
+            for line in quote["lines"]
+        ],
+        # The query string carries the result; the hash picks the page.
+        "success_url": f"{return_base}/?checkout=success&session_id={{CHECKOUT_SESSION_ID}}#payment-success",
+        "cancel_url": f"{return_base}/?checkout=cancel#payment-cancel",
+    }
+    if booking["email"]:
+        params["customer_email"] = booking["email"]
+
+    try:
+        session = stripe_create_checkout(params, f"checkout-appointment-{appointment_id}")
+    except Exception:
+        logger.exception("Could not create a Stripe Checkout session for appointment %s", appointment_id)
+        release_unpaid_hold(appointment_id, "Checkout failed")
+        raise ApiError(502, "We couldn't start the online payment, so the time was not booked. "
+                            "Please try again or choose Pay at Shop.")
+    write(
+        "UPDATE Appointment SET stripe_checkout_session_id = %s WHERE appointment_id = %s",
+        (session["id"], appointment_id),
+    )
+
+    response = {
+        "checkoutUrl": session["url"],
+        "sessionId": session["id"],
+        "appointmentId": str(appointment_id),
+    }
+    if booking["guest_token"]:
+        # Shown once. The site keeps it for the confirmation page after payment.
+        response["guestToken"] = booking["guest_token"]
+    return jsonify(response), 201
+
+
+@app.route("/api/customer/stripe/checkout/<session_id>", methods=["GET"])
+def customer_checkout_result(session_id):
+    """The booking behind a Checkout Session, for the page Stripe returns to."""
+    if not re.fullmatch(r"cs_[A-Za-z0-9_]{1,250}", session_id):
+        raise ApiError(404, "We couldn't find that payment.")
+    rows = read(
+        "SELECT appointment_id, payment_status FROM Appointment WHERE stripe_checkout_session_id = %s",
+        (session_id,),
+    )
+    if not rows:
+        raise ApiError(404, "We couldn't find that payment.")
+    appointment_id = rows[0]["appointment_id"]
+    authorize_customer_change(appointment_id, {})
+
+    if rows[0]["payment_status"] == AWAITING_PAYMENT and STRIPE_SECRET_KEY:
+        # Don't wait for the webhook: ask Stripe directly.
+        try:
+            apply_checkout_session(stripe_retrieve_checkout(session_id))
+        except Exception:
+            logger.warning("Could not check Stripe session %s", session_id, exc_info=True)
+    return jsonify(appointment_json(fetch_appointment(appointment_id), "customer")), 200
+
+
+@app.route("/api/stripe/webhook", methods=["POST"])
+def stripe_webhook():
+    """Stripe's signed events. Answers 2xx once an event is recorded."""
+    if not STRIPE_WEBHOOK_SECRET:
+        raise ApiError(503, "Stripe webhook is not configured.")
+    payload = request.get_data()
+    try:
+        stripe.WebhookSignature.verify_header(
+            payload, request.headers.get("Stripe-Signature"), STRIPE_WEBHOOK_SECRET, tolerance=300)
+        event = json.loads(payload)
+    except (ValueError, stripe.SignatureVerificationError):
+        return jsonify({"message": "Invalid webhook signature."}), 400
+
+    event_type = event.get("type")
+    obj = (event.get("data") or {}).get("object") or {}
+    if event_type in ("checkout.session.completed", "checkout.session.async_payment_succeeded",
+                      "checkout.session.expired"):
+        if obj.get("mode") == "payment":
+            apply_checkout_session(obj)
+    elif event_type == "checkout.session.async_payment_failed":
+        row = None
+        try:
+            row = payment_row(int((obj.get("metadata") or {}).get("appointment_id", "")))
+        except (TypeError, ValueError):
+            pass
+        if row and row["stripe_checkout_session_id"] == obj.get("id"):
+            release_unpaid_hold(row["appointment_id"], "Payment failed")
+    elif event_type == "charge.refunded":
+        record_refund(obj)
+    return jsonify({"received": True}), 200
+
+
+# ---------------------------------------------------------------------------
+# Reference photos (customer uploads, admin views)
+# ---------------------------------------------------------------------------
+# Every photo is re-encoded as a JPEG before it is stored. That proves it is a
+# real image, caps its size, and drops all metadata, including the GPS location
+# phones save inside photos. The database keeps only the storage key; links
+# handed to browsers are signed and expire after PHOTO_URL_SECONDS.
+
+_s3_client = None
+
+
+def photo_storage():
+    """'s3', 'local' (development only), or None when uploads are not configured."""
+    if UPLOADS_BUCKET:
+        return "s3"
+    if not IS_PRODUCTION:
+        return "local"
+    return None
+
+
+def s3_client():
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client(
+            "s3",
+            region_name=UPLOADS_REGION,
+            config=BotoConfig(signature_version="s3v4", connect_timeout=5, read_timeout=20,
+                              retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _s3_client
+
+
+def store_photo(key, data):
+    if photo_storage() == "s3":
+        s3_client().put_object(Bucket=UPLOADS_BUCKET, Key=key, Body=data, ContentType="image/jpeg")
+        return
+    path = os.path.join(LOCAL_UPLOADS_DIR, key)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as file:
+        file.write(data)
+
+
+def delete_stored_photo(key):
+    """Best effort: a leftover file is harmless, a failed request is not."""
+    try:
+        if photo_storage() == "s3":
+            s3_client().delete_object(Bucket=UPLOADS_BUCKET, Key=key)
+        elif PHOTO_KEY_PATTERN.fullmatch(key):
+            os.remove(os.path.join(LOCAL_UPLOADS_DIR, key))
+    except (BotoCoreError, ClientError, OSError):
+        logger.exception("Could not delete stored photo %s", key)
+
+
+def photo_url(key):
+    if photo_storage() == "s3":
+        return s3_client().generate_presigned_url(
+            "get_object", Params={"Bucket": UPLOADS_BUCKET, "Key": key}, ExpiresIn=PHOTO_URL_SECONDS,
+        )
+    return f"{request.host_url.rstrip('/')}/api/dev/uploads/{key}"
+
+
+def prepare_photo(upload):
+    """Validate an uploaded file and return it re-encoded as JPEG bytes."""
+    if upload is None or not upload.filename:
+        raise ApiError(400, "Please choose a photo to upload.")
+    raw = upload.stream.read(MAX_PHOTO_BYTES + 1)
+    if len(raw) > MAX_PHOTO_BYTES:
+        raise ApiError(413, f"That photo is too large. Photos must be {MAX_PHOTO_BYTES // (1024 * 1024)} MB or smaller.")
+    if not raw:
+        raise ApiError(400, "That file is empty. Please choose a photo.")
+    unreadable = "That file isn't a photo we can read. Please upload a JPEG, PNG, or WebP image."
+    try:
+        with Image.open(io.BytesIO(raw)) as original:
+            if original.format not in ALLOWED_PHOTO_FORMATS:
+                raise ApiError(415, "Please upload a JPEG, PNG, or WebP photo.")
+            image = ImageOps.exif_transpose(original)  # keep phone photos the right way up
+            image.thumbnail((PHOTO_MAX_EDGE, PHOTO_MAX_EDGE))
+            if image.mode in ("RGBA", "LA", "P"):
+                image = image.convert("RGBA")
+                background = Image.new("RGB", image.size, (255, 255, 255))
+                background.paste(image, mask=image.getchannel("A"))
+                image = background
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+            output = io.BytesIO()
+            image.save(output, "JPEG", quality=85, optimize=True)  # saved without EXIF metadata
+    except ApiError:
+        raise
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError, SyntaxError):
+        raise ApiError(400, unreadable)
+    return output.getvalue()
+
+
+def photos_json(appointment_id):
+    rows = read(
+        "SELECT upload_id, file_url, uploaded_at FROM User_Upload "
+        "WHERE appointment_id = %s ORDER BY upload_id",
+        (appointment_id,),
+    )
+    if photo_storage() is None:
+        return []
+    return [{
+        "id": str(row["upload_id"]),
+        "url": photo_url(row["file_url"]),
+        "uploadedAt": row["uploaded_at"].strftime("%Y-%m-%dT%H:%M:%SZ"),
+    } for row in rows]
+
+
+def require_photo_storage():
+    if photo_storage() is None:
+        raise ApiError(503, "Photo uploads are temporarily unavailable. Please bring your photo to the appointment.")
+
+
+@app.route("/api/customer/appointments/<int:appointment_id>/photos", methods=["GET"])
+def list_customer_photos(appointment_id):
+    authorize_customer_change(appointment_id, {})
+    return jsonify({"photos": photos_json(appointment_id)}), 200
+
+
+@app.route("/api/customer/appointments/<int:appointment_id>/photos", methods=["POST"])
+def upload_customer_photo(appointment_id):
+    """Multipart form with one file in the field "photo". Guests send X-Guest-Token."""
+    authorize_customer_change(appointment_id, {})
+    require_photo_storage()
+    data = prepare_photo(request.files.get("photo"))
+
+    key = f"appointments/{appointment_id}/{uuid.uuid4().hex}.jpg"
+    stored = False
+    try:
+        with transaction():
+            lock_booked_appointment(appointment_id)  # also serializes concurrent uploads
+            owner = read(
+                "SELECT a.customer_id, COUNT(u.upload_id) AS photos FROM Appointment a "
+                "LEFT JOIN User_Upload u ON u.appointment_id = a.appointment_id "
+                "WHERE a.appointment_id = %s GROUP BY a.appointment_id",
+                (appointment_id,),
+            )[0]
+            if owner["photos"] >= MAX_PHOTOS_PER_APPOINTMENT:
+                raise ApiError(409, f"You can attach up to {MAX_PHOTOS_PER_APPOINTMENT} photos per appointment.")
+            store_photo(key, data)
+            stored = True
+            write(
+                "INSERT INTO User_Upload (customer_id, appointment_id, file_url, uploaded_at) "
+                "VALUES (%s, %s, %s, %s)",
+                (owner["customer_id"], appointment_id, key, utc_now()),
+                commit=False,
+            )
+    except (BotoCoreError, ClientError):
+        logger.exception("Storing photo %s failed.", key)
+        raise ApiError(503, "We couldn't save that photo right now. Please try again.")
+    except Exception:
+        if stored:
+            delete_stored_photo(key)  # the database row was rolled back
+        raise
+    return jsonify({"photos": photos_json(appointment_id)}), 201
+
+
+@app.route("/api/customer/appointments/<int:appointment_id>/photos/<int:upload_id>", methods=["DELETE"])
+def delete_customer_photo(appointment_id, upload_id):
+    authorize_customer_change(appointment_id, {})
+    with transaction():
+        lock_booked_appointment(appointment_id)
+        rows = read(
+            "SELECT file_url FROM User_Upload WHERE upload_id = %s AND appointment_id = %s",
+            (upload_id, appointment_id),
+        )
+        if not rows:
+            raise ApiError(404, "Photo not found.")
+        write("DELETE FROM User_Upload WHERE upload_id = %s", (upload_id,), commit=False)
+    delete_stored_photo(rows[0]["file_url"])
+    return "", 204
+
+
+@app.route("/api/dev/uploads/<path:key>", methods=["GET"])
+def serve_local_photo(key):
+    """Development only: serves photos saved in uploads_local/ when no bucket is set."""
+    if photo_storage() != "local" or not PHOTO_KEY_PATTERN.fullmatch(key):
+        raise ApiError(404, "Photo not found.")
+    return flask.send_from_directory(LOCAL_UPLOADS_DIR, key, mimetype="image/jpeg")
 
 
 # ---------------------------------------------------------------------------
@@ -1763,10 +2379,9 @@ def admin_logout():
 
 
 # ---------------------------------------------------------------------------
-# Admin "Forgot password": each admin has a private 6-digit PIN (set by the shop owner
-# with 003_admin_pin.sql or set_admin_pin.py). Username + PIN lets the admin choose a new password, which is
-# saved in the Staff table. No email or text message is needed.
-# Needs the Staff columns from migrations/003_admin_pin.sql.
+# Admin "Forgot password": each admin has a private 6-digit PIN, set by the shop owner
+# with set_admin_pin.py and stored only as a hash (Staff.pin_hash). Username + PIN lets the
+# admin choose a new password, which is saved in the Staff table. No email or text is needed.
 # ---------------------------------------------------------------------------
 
 PIN_MAX_ATTEMPTS = 5
@@ -1789,7 +2404,7 @@ def admin_reset_password():
     bad_pin = "Username or PIN is incorrect."
 
     rows = read(
-        "SELECT staff_id, role, pin, pin_failed_attempts, pin_locked_until FROM Staff "
+        "SELECT staff_id, role, pin_hash, pin_failed_attempts, pin_locked_until FROM Staff "
         "WHERE LOWER(username) = LOWER(%s) LIMIT 1",
         (username.strip(),),
     )
@@ -1805,9 +2420,10 @@ def admin_reset_password():
               (staff["staff_id"],))
         staff["pin_failed_attempts"] = 0
 
-    # The PIN typed in is compared with the PIN saved in the Staff table (same time for any username).
-    has_pin = bool(staff and staff["role"] == "admin" and staff["pin"])
-    pin_ok = hmac.compare_digest(str(staff["pin"]) if has_pin else "------", pin)
+    # The PIN typed in is checked against the saved hash. Unknown usernames are checked
+    # against a dummy hash so the response takes the same time either way.
+    has_pin = bool(staff and staff["role"] == "admin" and staff["pin_hash"])
+    pin_ok = check_password_hash(staff["pin_hash"] if has_pin else _DUMMY_PASSWORD_HASH, pin)
     if not has_pin or not pin_ok:
         if has_pin:
             # Count the wrong try in the database; lock the account after too many.
@@ -1845,6 +2461,13 @@ def admin_list_appointments():
 @require_admin
 def admin_get_appointment(appointment_id):
     return jsonify(appointment_json(fetch_appointment(appointment_id), "admin")), 200
+
+
+@app.route("/api/appointments/<int:appointment_id>/photos", methods=["GET"])
+@require_admin
+def admin_list_photos(appointment_id):
+    fetch_appointment(appointment_id)  # 404 when the appointment does not exist
+    return jsonify({"photos": photos_json(appointment_id)}), 200
 
 
 @app.route("/api/appointments", methods=["POST"])
@@ -1887,7 +2510,11 @@ def admin_update_appointment(appointment_id):
     if status is not None:
         if status not in ("Cancelled", "Completed", "No-show"):
             raise ApiError(400, "status must be Cancelled, Completed, or No-show.")
-        set_status(appointment_id, API_TO_STATUS[status])
+        if status == "Cancelled":
+            # Refunds an online payment in full. Completed and No-show keep it.
+            cancel_appointment(appointment_id, by_customer=False)
+        else:
+            set_status(appointment_id, API_TO_STATUS[status])
     elif wants_move:
         day = parse_date(data.get("date"))
         minute = parse_hhmm(data.get("time"))
