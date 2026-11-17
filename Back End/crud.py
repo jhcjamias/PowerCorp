@@ -24,6 +24,9 @@ Environment variables (all optional in development):
     UPLOADS_BUCKET          private S3 bucket for reference photos (development without it
                             saves photos in Back End/uploads_local/)
     AWS_REGION              region of UPLOADS_BUCKET (default us-east-1)
+    STRIPE_SECRET_KEY       Stripe secret key (sk_test_... or sk_live_...); enables online payment
+    STRIPE_WEBHOOK_SECRET   signing secret (whsec_...) of the /api/stripe/webhook endpoint
+    SITE_URL                customer site address Stripe returns to, e.g. https://rolazcutzbarbershop.com
     GOOGLE_PLACES_API_KEY / GOOGLE_PLACE_ID / GOOGLE_REVIEWS_URL
     INSTAGRAM_ACCESS_TOKEN
 """
@@ -51,6 +54,7 @@ from zoneinfo import ZoneInfo
 
 import boto3
 import flask
+import stripe
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 from flask import g, jsonify, request
@@ -157,6 +161,17 @@ Image.MAX_IMAGE_PIXELS = 40_000_000  # refuse "decompression bomb" images early
 
 PROVIDER_CACHE_SECONDS = 15 * 60
 PROVIDER_FAILURE_CACHE_SECONDS = 60
+
+# Online card payments through Stripe Checkout. Without STRIPE_SECRET_KEY the
+# "Pay online" option answers 503 and Pay at Shop keeps working.
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+# Where Stripe sends the customer back, e.g. https://rolazcutzbarbershop.com.
+# When unset, the approved Origin of the checkout request is used instead.
+SITE_URL = os.getenv("SITE_URL", "").strip().rstrip("/")
+STRIPE_CHECKOUT_SECONDS = 30 * 60  # how long an unpaid online booking holds its time
+PREPAID_CANCEL_CUTOFF = timedelta(hours=2)  # the policy's cancellation window
+PAYMENT_METHOD_LABELS = {"stripe": "Online card"}
 
 DEFAULT_ORIGINS = [
     "http://localhost:5173", "http://127.0.0.1:5173",   # admin (Vite)
@@ -952,9 +967,11 @@ def appointment_json(row, audience):
             }
             for line in row["lines"]
         ],
+        # An unpaid online booking is still "Booked" (it holds its time), and
+        # "payment" says "Awaiting payment" until Stripe confirms the charge.
         "status": STATUS_TO_API.get(row["status"], row["status"]),
         "payment": row["payment_status"],
-        "paymentMethod": row["payment_method"],
+        "paymentMethod": PAYMENT_METHOD_LABELS.get(row["payment_method"], row["payment_method"]),
         "receiptSent": bool(row["receipt_sent"]),
         "referencePhotos": int(row["reference_photos"] or 0),
         "notes": row["notes"] or "",
@@ -1449,12 +1466,15 @@ def check_policy(data):
         raise ApiError(400, "Please review and accept the current Appointment & Payment Policy.")
 
 
-def check_snapshot_extras(data):
+def check_snapshot_extras(data, online=False):
     """Validate the admin-shape fields the browser sends but cannot control."""
     if data.get("status", "Booked") != "Booked":
         raise ApiError(400, "New appointments must have status Booked.")
-    if data.get("payment", "Pay at Shop") != "Pay at Shop" or data.get("paymentMethod", "shop") != "shop":
-        raise ApiError(400, "Online payment is not available yet. Please choose Pay at Shop.")
+    if online:
+        if data.get("payment", "Stripe") != "Stripe" or data.get("paymentMethod", "stripe") != "stripe":
+            raise ApiError(400, "Online checkout only takes card payment through Stripe.")
+    elif data.get("payment", "Pay at Shop") != "Pay at Shop" or data.get("paymentMethod", "shop") != "shop":
+        raise ApiError(400, "To pay online, use the Pay Online option. Otherwise choose Pay at Shop.")
     if "receiptSent" in data and not isinstance(data["receiptSent"], bool):
         raise ApiError(400, "receiptSent must be true or false.")
     photos = data.get("referencePhotos", 0)
@@ -1472,11 +1492,13 @@ def list_customer_appointments():
     return jsonify([appointment_json(row, "customer") for row in rows]), 200
 
 
-@app.route("/api/customer/appointments", methods=["POST"])
-def create_customer_appointment():
-    data = json_body()
+def customer_booking_request(data, online=False):
+    """
+    Validate a customer booking request (Pay at Shop or online checkout).
+    Prices always come from the catalog, never from the browser.
+    """
     check_policy(data)
-    check_snapshot_extras(data)
+    check_snapshot_extras(data, online=online)
     day = parse_date(data.get("date"))
     minute = parse_hhmm(data.get("time"))
     if day <= shop_today():
@@ -1487,29 +1509,48 @@ def create_customer_appointment():
     account = current_customer()
     if account:
         # A signed-in booking belongs to the account and uses its verified phone.
-        customer_id = account["customer_id"]
         profile = customer_profile(account)
-        name = validate_name(snapshot["name"]) if snapshot.get("name") else profile["name"]
-        email = validate_optional_email(snapshot.get("email")) or (account["email"] or None)
-        phone = profile["phone"]
-        guest_token = None
+        booking = {
+            "customer_id": account["customer_id"],
+            "name": validate_name(snapshot["name"]) if snapshot.get("name") else profile["name"],
+            "email": validate_optional_email(snapshot.get("email")) or (account["email"] or None),
+            "phone": profile["phone"],
+            "guest_token": None,
+        }
     else:
         # Guest booking: no owner. A management token authorizes later changes.
-        customer_id = None
-        name = validate_name(snapshot.get("name"))
-        phone = normalize_phone(snapshot.get("phone"))
-        email = validate_optional_email(snapshot.get("email"))
-        guest_token = secrets.token_urlsafe(32)
+        booking = {
+            "customer_id": None,
+            "name": validate_name(snapshot.get("name")),
+            "phone": normalize_phone(snapshot.get("phone")),
+            "email": validate_optional_email(snapshot.get("email")),
+            "guest_token": secrets.token_urlsafe(32),
+        }
+    booking.update(
+        day=day, minute=minute, notes=notes,
+        quote=quote_from_snapshot(load_catalog(), data.get("services")),
+    )
+    return booking
 
-    quote = quote_from_snapshot(load_catalog(), data.get("services"))
-    appointment_id = insert_appointment(
-        staff_id=barber_staff_id(), quote=quote, day=day, minute=minute,
-        customer_id=customer_id, name=name, phone=phone, email=email, notes=notes,
-        payment_status="Pay at Shop", payment_method="shop",
+
+def insert_customer_booking(booking, payment_status, payment_method):
+    guest_token = booking["guest_token"]
+    return insert_appointment(
+        staff_id=barber_staff_id(), quote=booking["quote"], day=booking["day"],
+        minute=booking["minute"], customer_id=booking["customer_id"], name=booking["name"],
+        phone=booking["phone"], email=booking["email"], notes=booking["notes"],
+        payment_status=payment_status, payment_method=payment_method,
         policy_version=POLICY_VERSION,
         guest_token_hash=sha256_hex(guest_token) if guest_token else None,
         staff_booking=False,
     )
+
+
+@app.route("/api/customer/appointments", methods=["POST"])
+def create_customer_appointment():
+    booking = customer_booking_request(json_body())
+    guest_token = booking["guest_token"]
+    appointment_id = insert_customer_booking(booking, "Pay at Shop", "shop")
 
     result = appointment_json(fetch_appointment(appointment_id), "customer")
     if guest_token:
@@ -1554,7 +1595,7 @@ def update_customer_appointment(appointment_id):
         current = fetch_appointment(appointment_id)
         if current["status"] == "booked" and current["start_time"] <= utc_now():
             raise ApiError(409, "This appointment has already started and can no longer be cancelled online.")
-        set_status(appointment_id, "canceled")
+        cancel_appointment(appointment_id, by_customer=True)
     elif status in (None, "Booked") and wants_move:
         day = parse_date(data.get("date"))
         minute = parse_hhmm(data.get("time"))
@@ -1563,6 +1604,7 @@ def update_customer_appointment(appointment_id):
         quote = None
         if "services" in data:
             quote = quote_from_snapshot(load_catalog(), data["services"])
+            quote = keep_prepaid_services(appointment_id, quote)
         notes = validate_notes(data["notes"]) if "notes" in data else None
         reschedule(appointment_id, day, minute, quote=quote, notes=notes)
     elif status in ("Completed", "No-show"):
@@ -1571,6 +1613,349 @@ def update_customer_appointment(appointment_id):
         raise ApiError(400, "Send a new date and time to reschedule, or status Cancelled to cancel.")
 
     return jsonify(appointment_json(fetch_appointment(appointment_id), "customer")), 200
+
+
+# ---------------------------------------------------------------------------
+# Online payment (Stripe Checkout)
+# ---------------------------------------------------------------------------
+# 1. POST /api/customer/stripe/checkout books the time with payment
+#    "Awaiting payment" and returns a Stripe-hosted payment page.
+# 2. Stripe's signed webhook, or the customer's return to the site, records
+#    the result: "Paid", or the hold is released ("Expired", "Payment failed").
+# 3. Cancelling a paid booking refunds it in full ("Refunded"). Customers can
+#    cancel a prepaid booking online until 2 hours before it starts; inside that
+#    window they call the shop and staff decide. Completed and No-show keep it.
+# The amount is always checked against the stored appointment lines.
+
+AWAITING_PAYMENT = "Awaiting payment"
+
+
+def stripe_client():
+    if not STRIPE_SECRET_KEY:
+        raise ApiError(503, "Online payment is not available right now. Please choose Pay at Shop.")
+    return stripe.StripeClient(STRIPE_SECRET_KEY, max_network_retries=2)
+
+
+# The four Stripe calls the app makes. Each returns a plain dict.
+def stripe_create_checkout(params, idempotency_key):
+    session = stripe_client().v1.checkout.sessions.create(
+        params=params, options={"idempotency_key": idempotency_key})
+    return session.to_dict()
+
+
+def stripe_retrieve_checkout(session_id):
+    return stripe_client().v1.checkout.sessions.retrieve(session_id).to_dict()
+
+
+def stripe_expire_checkout(session_id):
+    return stripe_client().v1.checkout.sessions.expire(session_id).to_dict()
+
+
+def stripe_refund(payment_intent_id, appointment_id):
+    refund = stripe_client().v1.refunds.create(
+        params={
+            "payment_intent": payment_intent_id,
+            "reason": "requested_by_customer",
+            "metadata": {"appointment_id": str(appointment_id)},
+        },
+        options={"idempotency_key": f"refund-appointment-{appointment_id}"},
+    )
+    return refund.to_dict()
+
+
+def checkout_return_base():
+    """The customer site address Stripe sends the customer back to."""
+    if SITE_URL:
+        return SITE_URL
+    origin = (request.headers.get("Origin") or "").rstrip("/")
+    if origin and origin in ALLOWED_ORIGINS:
+        return origin
+    raise ApiError(503, "Online payment is not set up yet. Please choose Pay at Shop.")
+
+
+def payment_row(appointment_id):
+    rows = read(
+        """
+        SELECT appointment_id, status, start_time, payment_method, payment_status,
+               stripe_checkout_session_id, stripe_payment_intent_id
+        FROM Appointment WHERE appointment_id = %s
+        """,
+        (appointment_id,),
+    )
+    return rows[0] if rows else None
+
+
+def expected_amount_cents(appointment_id):
+    rows = read(
+        "SELECT COALESCE(SUM(price_cents_at_booking), 0) AS amount "
+        "FROM Appointment_Service WHERE appointment_id = %s",
+        (appointment_id,),
+    )
+    return int(rows[0]["amount"]) if rows else 0
+
+
+def release_unpaid_hold(appointment_id, outcome):
+    """Cancel an online booking that was never paid. Returns True if it did."""
+    count, _ = write(
+        """
+        UPDATE Appointment
+        SET status = 'canceled', payment_status = %s, updated_at = %s
+        WHERE appointment_id = %s AND payment_method = 'stripe'
+          AND payment_status = %s AND status = 'booked'
+        """,
+        (outcome, utc_now(), appointment_id, AWAITING_PAYMENT),
+    )
+    return count > 0
+
+
+def stop_checkout(session_id):
+    """Close a Stripe payment page so a cancelled booking can't be paid."""
+    if not session_id:
+        return
+    try:
+        stripe_expire_checkout(session_id)
+    except Exception:
+        # Already paid or expired. A late payment is refunded by the webhook.
+        logger.warning("Could not expire Stripe Checkout session %s", session_id, exc_info=True)
+
+
+def refund_payment(appointment_id):
+    """Refund a paid online booking in full. Raises if Stripe refuses."""
+    row = payment_row(appointment_id)
+    if not row or row["payment_method"] != "stripe" or row["payment_status"] != "Paid":
+        return
+    if not row["stripe_payment_intent_id"]:
+        raise ApiError(409, "This online payment has no Stripe record to refund. "
+                            "Refund it in the Stripe dashboard, then cancel again.")
+    try:
+        refund = stripe_refund(row["stripe_payment_intent_id"], appointment_id)
+    except ApiError:
+        raise
+    except Exception:
+        logger.exception("Stripe refund failed for appointment %s", appointment_id)
+        refund = None
+    if not refund or refund.get("status") in ("failed", "canceled"):
+        raise ApiError(502, "The refund could not be started, so the appointment was not cancelled. "
+                            "Please try again in a moment.")
+    write(
+        "UPDATE Appointment SET payment_status = 'Refunded', updated_at = %s "
+        "WHERE appointment_id = %s AND payment_status = 'Paid'",
+        (utc_now(), appointment_id),
+    )
+
+
+def cancel_appointment(appointment_id, by_customer):
+    """Cancel a booked appointment, settling any online payment first."""
+    row = payment_row(appointment_id)
+    if row is None:
+        raise ApiError(404, "Appointment not found.")
+    if row["status"] == "booked" and row["payment_method"] == "stripe":
+        if row["payment_status"] == AWAITING_PAYMENT:
+            if release_unpaid_hold(appointment_id, "Cancelled"):
+                stop_checkout(row["stripe_checkout_session_id"])
+                return
+            row = payment_row(appointment_id)  # it was paid a moment ago
+        if row["payment_status"] == "Paid":
+            if by_customer and row["start_time"] - utc_now() < PREPAID_CANCEL_CUTOFF:
+                raise ApiError(409, "Prepaid appointments can be cancelled online until 2 hours "
+                                    f"before they start. Please call the shop at {BUSINESS['phone']}.")
+            refund_payment(appointment_id)
+    set_status(appointment_id, "canceled")  # raises 409 unless still booked
+
+
+def keep_prepaid_services(appointment_id, quote):
+    """A booking paid online keeps the services (and prices) it was paid for."""
+    row = payment_row(appointment_id)
+    if not row or row["payment_method"] != "stripe":
+        return quote
+    current = [line["slug"] for line in fetch_appointment(appointment_id)["lines"]]
+    if [line["slug"] for line in quote["lines"]] != current:
+        raise ApiError(409, "This appointment was paid online, so its services can't be changed online. "
+                            f"Please call the shop at {BUSINESS['phone']}.")
+    return None
+
+
+def apply_checkout_session(session):
+    """Record what a Checkout Session says about its booking. Safe to repeat."""
+    try:
+        appointment_id = int((session.get("metadata") or {}).get("appointment_id", ""))
+    except (TypeError, ValueError):
+        logger.warning("Stripe session %s has no appointment ID", session.get("id"))
+        return
+    row = payment_row(appointment_id)
+    if row is None or row["stripe_checkout_session_id"] != session.get("id"):
+        logger.warning("Stripe session %s does not match appointment %s", session.get("id"), appointment_id)
+        return
+
+    if session.get("status") == "expired":
+        release_unpaid_hold(appointment_id, "Expired")
+        return
+    if session.get("payment_status") != "paid":
+        return  # still open, or a delayed payment method is processing
+
+    expected = expected_amount_cents(appointment_id)
+    if (session.get("currency") or "").lower() != "usd" or session.get("amount_total") != expected:
+        logger.error("Stripe amount mismatch for appointment %s: charged %s %s, expected %s usd",
+                     appointment_id, session.get("amount_total"), session.get("currency"), expected)
+        return
+
+    intent = session.get("payment_intent")
+    if isinstance(intent, dict):
+        intent = intent.get("id")
+    write(
+        """
+        UPDATE Appointment
+        SET payment_status = 'Paid', stripe_payment_intent_id = %s, updated_at = %s
+        WHERE appointment_id = %s AND payment_method = 'stripe'
+          AND payment_status IN (%s, 'Cancelled')
+        """,
+        (intent, utc_now(), appointment_id, AWAITING_PAYMENT),
+    )
+    row = payment_row(appointment_id)
+    if row["status"] == "canceled" and row["payment_status"] == "Paid":
+        # Paid after the booking was cancelled: give the money back.
+        refund_payment(appointment_id)
+
+
+def record_refund(charge):
+    """A refund made in the Stripe dashboard (charge.refunded)."""
+    intent = charge.get("payment_intent")
+    if isinstance(intent, dict):
+        intent = intent.get("id")
+    if not intent:
+        return
+    amount = int(charge.get("amount") or 0)
+    refunded = int(charge.get("amount_refunded") or 0)
+    outcome = "Refunded" if amount > 0 and refunded >= amount else "Partially refunded"
+    write(
+        """
+        UPDATE Appointment SET payment_status = %s, updated_at = %s
+        WHERE stripe_payment_intent_id = %s AND payment_method = 'stripe'
+          AND payment_status IN ('Paid', 'Partially refunded')
+        """,
+        (outcome, utc_now(), intent),
+    )
+
+
+@app.route("/api/customer/stripe/checkout", methods=["POST"])
+def create_customer_stripe_checkout():
+    """Hold the time, then hand the customer a Stripe-hosted payment page."""
+    data = json_body()
+    if data.get("replacesId"):
+        raise ApiError(400, "To reschedule, change the time on your existing appointment.")
+    booking = customer_booking_request(data, online=True)
+    stripe_client()  # 503 before anything is reserved
+    return_base = checkout_return_base()
+    quote = booking["quote"]
+    if quote["price_cents"] <= 0:
+        raise ApiError(400, "There is nothing to pay online for this booking. Please choose Pay at Shop.")
+
+    appointment_id = insert_customer_booking(booking, AWAITING_PAYMENT, "stripe")
+    reference = {"appointment_id": str(appointment_id)}
+    params = {
+        "mode": "payment",
+        "payment_method_types": ["card"],
+        "expires_at": int(time.time()) + STRIPE_CHECKOUT_SECONDS,
+        "client_reference_id": str(appointment_id),
+        "metadata": reference,
+        "payment_intent_data": {
+            "metadata": reference,
+            "description": f"Rolaz Cutz appointment {appointment_id}",
+        },
+        "line_items": [
+            {
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": line["name"]},
+                    "unit_amount": int(line["price_cents"]),
+                },
+                "quantity": 1,
+            }
+            for line in quote["lines"]
+        ],
+        # The query string carries the result; the hash picks the page.
+        "success_url": f"{return_base}/?checkout=success&session_id={{CHECKOUT_SESSION_ID}}#payment-success",
+        "cancel_url": f"{return_base}/?checkout=cancel#payment-cancel",
+    }
+    if booking["email"]:
+        params["customer_email"] = booking["email"]
+
+    try:
+        session = stripe_create_checkout(params, f"checkout-appointment-{appointment_id}")
+    except Exception:
+        logger.exception("Could not create a Stripe Checkout session for appointment %s", appointment_id)
+        release_unpaid_hold(appointment_id, "Checkout failed")
+        raise ApiError(502, "We couldn't start the online payment, so the time was not booked. "
+                            "Please try again or choose Pay at Shop.")
+    write(
+        "UPDATE Appointment SET stripe_checkout_session_id = %s WHERE appointment_id = %s",
+        (session["id"], appointment_id),
+    )
+
+    response = {
+        "checkoutUrl": session["url"],
+        "sessionId": session["id"],
+        "appointmentId": str(appointment_id),
+    }
+    if booking["guest_token"]:
+        # Shown once. The site keeps it for the confirmation page after payment.
+        response["guestToken"] = booking["guest_token"]
+    return jsonify(response), 201
+
+
+@app.route("/api/customer/stripe/checkout/<session_id>", methods=["GET"])
+def customer_checkout_result(session_id):
+    """The booking behind a Checkout Session, for the page Stripe returns to."""
+    if not re.fullmatch(r"cs_[A-Za-z0-9_]{1,250}", session_id):
+        raise ApiError(404, "We couldn't find that payment.")
+    rows = read(
+        "SELECT appointment_id, payment_status FROM Appointment WHERE stripe_checkout_session_id = %s",
+        (session_id,),
+    )
+    if not rows:
+        raise ApiError(404, "We couldn't find that payment.")
+    appointment_id = rows[0]["appointment_id"]
+    authorize_customer_change(appointment_id, {})
+
+    if rows[0]["payment_status"] == AWAITING_PAYMENT and STRIPE_SECRET_KEY:
+        # Don't wait for the webhook: ask Stripe directly.
+        try:
+            apply_checkout_session(stripe_retrieve_checkout(session_id))
+        except Exception:
+            logger.warning("Could not check Stripe session %s", session_id, exc_info=True)
+    return jsonify(appointment_json(fetch_appointment(appointment_id), "customer")), 200
+
+
+@app.route("/api/stripe/webhook", methods=["POST"])
+def stripe_webhook():
+    """Stripe's signed events. Answers 2xx once an event is recorded."""
+    if not STRIPE_WEBHOOK_SECRET:
+        raise ApiError(503, "Stripe webhook is not configured.")
+    payload = request.get_data()
+    try:
+        stripe.WebhookSignature.verify_header(
+            payload, request.headers.get("Stripe-Signature"), STRIPE_WEBHOOK_SECRET, tolerance=300)
+        event = json.loads(payload)
+    except (ValueError, stripe.SignatureVerificationError):
+        return jsonify({"message": "Invalid webhook signature."}), 400
+
+    event_type = event.get("type")
+    obj = (event.get("data") or {}).get("object") or {}
+    if event_type in ("checkout.session.completed", "checkout.session.async_payment_succeeded",
+                      "checkout.session.expired"):
+        if obj.get("mode") == "payment":
+            apply_checkout_session(obj)
+    elif event_type == "checkout.session.async_payment_failed":
+        row = None
+        try:
+            row = payment_row(int((obj.get("metadata") or {}).get("appointment_id", "")))
+        except (TypeError, ValueError):
+            pass
+        if row and row["stripe_checkout_session_id"] == obj.get("id"):
+            release_unpaid_hold(row["appointment_id"], "Payment failed")
+    elif event_type == "charge.refunded":
+        record_refund(obj)
+    return jsonify({"received": True}), 200
 
 
 # ---------------------------------------------------------------------------
@@ -2124,7 +2509,11 @@ def admin_update_appointment(appointment_id):
     if status is not None:
         if status not in ("Cancelled", "Completed", "No-show"):
             raise ApiError(400, "status must be Cancelled, Completed, or No-show.")
-        set_status(appointment_id, API_TO_STATUS[status])
+        if status == "Cancelled":
+            # Refunds an online payment in full. Completed and No-show keep it.
+            cancel_appointment(appointment_id, by_customer=False)
+        else:
+            set_status(appointment_id, API_TO_STATUS[status])
     elif wants_move:
         day = parse_date(data.get("date"))
         minute = parse_hhmm(data.get("time"))
