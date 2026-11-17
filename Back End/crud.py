@@ -1322,6 +1322,20 @@ def customer_verify_code():
             (now, customer["customer_id"]),
         )
 
+    # Link any guest appointments booked with this verified phone number.
+    write(
+        """
+        UPDATE Appointment
+        SET customer_id = %s
+        WHERE customer_id IS NULL
+          AND customer_phone = %s
+        """,
+        (
+            customer["customer_id"],
+            phone,
+        ),
+    )
+
     response = jsonify({"authenticated": True, "customer": customer_profile(customer)})
     start_customer_session(response, customer["customer_id"])
     return response, 200
