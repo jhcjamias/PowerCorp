@@ -646,3 +646,62 @@ test('mock photo uploads count toward the appointment and stop at the limit', as
   const listed = (await api.listAppointments()).find((item) => item.id === appointment.id);
   assert.equal(listed.referencePhotos, 3);
 });
+
+function stripeRequest() {
+  return {
+    serviceId: 'regular', upgradeIds: [], date: '2026-12-01', time: 720, policyAccepted: true,
+    service: { id: 'regular', name: 'The OG', priceCents: 4500, duration: 35 }, upgrades: [],
+    customer: { name: 'Pat Guest', email: '', phone: '832-555-0101' },
+  };
+}
+
+test('Stripe checkout posts an online-payment booking and only accepts a Stripe-hosted link', async () => {
+  const calls = [];
+  let checkoutUrl = 'https://checkout.stripe.com/c/pay/cs_test_123';
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 201, headers: { get: () => '' }, text: async () => JSON.stringify({ checkoutUrl, sessionId: 'cs_test_123', appointmentId: '41', guestToken: 'guest-secret' }) };
+  };
+  const { core } = createCore({ fetchImpl, config: { mode: 'http', apiBaseUrl: 'https://api.example.test' } });
+  const checkout = await core.HttpCustomerApi.createStripeCheckout(stripeRequest());
+  assert.equal(calls[0].url, 'https://api.example.test/api/customer/stripe/checkout');
+  assert.equal(calls[0].options.method, 'POST');
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.payment, 'Stripe');
+  assert.equal(body.paymentMethod, 'stripe');
+  assert.equal(checkout.sessionId, 'cs_test_123');
+  assert.equal(checkout.guestToken, 'guest-secret');
+
+  checkoutUrl = 'https://evil.example/checkout';
+  await assert.rejects(core.HttpCustomerApi.createStripeCheckout(stripeRequest()), /invalid checkout link/);
+});
+
+test('the payment return page loads the booking with the guest code, and cancel releases it', async () => {
+  const calls = [];
+  const appointment = { id: '41', date: '2026-12-01', time: '12:00', status: 'Booked', payment: 'Paid', paymentMethod: 'Online card', services: [{ id: 'regular', name: 'The OG', price: 45, durationMin: 35 }] };
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, headers: { get: () => '' }, text: async () => JSON.stringify(appointment) };
+  };
+  const { core } = createCore({ fetchImpl, config: { mode: 'http', apiBaseUrl: 'https://api.example.test' } });
+  const result = await core.HttpCustomerApi.getCheckoutResult({ sessionId: 'cs_test_123', guestToken: 'guest-secret' });
+  assert.equal(calls[0].url, 'https://api.example.test/api/customer/stripe/checkout/cs_test_123');
+  assert.equal(calls[0].options.method, undefined, 'a GET request');
+  assert.equal(calls[0].options.headers['X-Guest-Token'], 'guest-secret');
+  assert.equal(result.payment, 'Paid');
+  assert.equal(result.priceCents, 4500);
+
+  await core.HttpCustomerApi.cancelAppointment({ id: '41', guestToken: 'guest-secret' });
+  assert.equal(calls[1].url, 'https://api.example.test/api/customer/appointments/41');
+  assert.equal(calls[1].options.method, 'PATCH');
+  assert.equal(calls[1].options.headers['X-Guest-Token'], 'guest-secret');
+  assert.deepEqual(JSON.parse(calls[1].options.body), { status: 'Cancelled' });
+});
+
+test('online payment is offered only on the live site, never in the prototype', () => {
+  const api = createMockApi();
+  assert.equal(api.createStripeCheckout, undefined, 'the mock API must not reach a real payment service');
+  assert.match(app, /CUSTOMER_CONFIG\.mode === 'http' && !state\.replacesId \? '<label class="payment-choice"><input type="radio" name="payment" value="stripe">/);
+  assert.match(app, /if \(route === 'payment-success'\) html = await paymentSuccessView\(\);/);
+  assert.match(app, /GUEST BOOKING CODE/);
+});

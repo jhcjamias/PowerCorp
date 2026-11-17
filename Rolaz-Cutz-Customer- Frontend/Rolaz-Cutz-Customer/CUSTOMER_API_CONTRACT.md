@@ -355,6 +355,44 @@ Require either the owning customer session or a separate secure guest-management
 
 Return the saved appointment in the same admin shape after create, reschedule, or cancel.
 
+## Online payment (Stripe Checkout)
+
+Customers can pay by card before the visit instead of paying at the shop. The card form is Stripe's hosted page; card details never touch this site or the API. The back end needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and `SITE_URL`; without the key the endpoint answers `503` and Pay at Shop keeps working.
+
+### POST `/api/customer/stripe/checkout`
+
+The same body as `POST /api/customer/appointments`, with `"payment": "Stripe"` and `"paymentMethod": "stripe"`. Not used for rescheduling (`replacesId` is rejected with `400`). The API recalculates prices from the catalog, books the time with `payment: "Awaiting payment"`, and answers `201`:
+
+```json
+{ "checkoutUrl": "https://checkout.stripe.com/c/pay/cs_test_...", "sessionId": "cs_test_...", "appointmentId": "41", "guestToken": "shown-once-for-guests" }
+```
+
+The site uploads any reference photos to `appointmentId`, saves `sessionId`, `appointmentId` and `guestToken` in `sessionStorage`, and sends the browser to `checkoutUrl`. An unpaid booking holds its time for 30 minutes; then Stripe expires the page and the time is released (`status: "Cancelled"`, `payment: "Expired"`).
+
+Stripe sends the customer back to `SITE_URL/?checkout=success&session_id=...#payment-success` or `SITE_URL/?checkout=cancel#payment-cancel`. The cancel page cancels the held booking straight away.
+
+### GET `/api/customer/stripe/checkout/:sessionId`
+
+Returns the booking in the admin shape for the payment return page. Requires the owning customer session or the `X-Guest-Token` header (`401`/`403` otherwise, `404` for an unknown session). If the webhook hasn't arrived yet, the API asks Stripe directly, so a finished payment shows `payment: "Paid"`.
+
+### POST `/api/stripe/webhook`
+
+Called by Stripe only, signed with `STRIPE_WEBHOOK_SECRET` (bad signature: `400`). Events: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired`, `charge.refunded`. A payment is recorded only when the amount and currency match the booking's stored lines.
+
+### Payment states and refunds
+
+| `paymentMethod` | `payment` | Meaning |
+|---|---|---|
+| `Online card` | `Awaiting payment` | Booked, held for 30 minutes while the customer pays |
+| `Online card` | `Paid` | Stripe confirmed the charge |
+| `Online card` | `Refunded` / `Partially refunded` | Money returned (by cancelling, or in the Stripe dashboard) |
+| `Online card` | `Expired` / `Cancelled` / `Payment failed` / `Checkout failed` | Never paid; the time was released |
+
+- `status` stays `Booked`, `Completed`, `No-show` or `Cancelled`, so the admin pages work unchanged.
+- Cancelling a paid booking refunds it in full. Customers can cancel a prepaid booking online until **2 hours** before it starts (`409` inside that window: call the shop). Staff can cancel and refund at any time. `Completed` and `No-show` keep the payment.
+- If the refund fails, the booking is not cancelled (`502`), so nothing is cancelled without the money going back.
+- A prepaid booking can move to another time but can't change its services online (`409`); it keeps the prices that were paid.
+
 ## Reference photos
 
 Customers can attach up to 3 photos of the look they want to a booked appointment. The customer site uploads them one at a time right after the booking is created. A failed upload never undoes the booking; the confirmation page asks the customer to bring that photo instead.
