@@ -43,7 +43,8 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from functools import wraps
 from zoneinfo import ZoneInfo
-
+import stripe
+from dotenv import load_dotenv
 import flask
 from flask import g, jsonify, request
 from flask_cors import CORS
@@ -59,7 +60,23 @@ from sqlhelper import create_connection, execute_query, execute_read_query
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+from pathlib import Path
 
+# Load the private Stripe key
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+# Connect to Stripe
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+# Stripe Checkout settings
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_SUCCESS_URL = os.getenv(
+    "STRIPE_SUCCESS_URL",
+    "http://localhost:5500/#payment-success"
+)
+STRIPE_CANCEL_URL = os.getenv(
+    "STRIPE_CANCEL_URL",
+    "http://localhost:5500/#payment-cancel"
+)
 def env_flag(name, default):
     value = os.getenv(name)
     return default if value is None else value.strip().lower() in ("1", "true", "yes")
@@ -920,7 +937,7 @@ def appointment_json(row, audience):
             }
             for line in row["lines"]
         ],
-        "status": STATUS_TO_API.get(row["status"], row["status"]),
+        "status": ("Pending payment" if row["payment_method"] == "stripe" and row["payment_status"] == "Pending" else STATUS_TO_API.get(row["status"], row["status"])),
         "payment": row["payment_status"],
         "paymentMethod": row["payment_method"],
         "receiptSent": bool(row["receipt_sent"]),
@@ -1394,6 +1411,158 @@ def update_customer_profile():
 # ---------------------------------------------------------------------------
 # Customer appointments
 # ---------------------------------------------------------------------------
+
+def cancel_unpaid_stripe_appointment(appointment_id):
+    """Release a reserved slot when Stripe checkout expires."""
+    write(
+        """
+        UPDATE Appointment
+        SET status = 'canceled',
+            payment_status = 'Canceled',
+            updated_at = %s
+        WHERE appointment_id = %s
+          AND payment_method = 'stripe'
+          AND payment_status = 'Pending'
+          AND status = 'booked'
+        """,
+        (utc_now(), appointment_id),
+    )
+
+def create_stripe_checkout_session(quote, appointment_id):
+    """Create a secure Stripe-hosted payment page."""
+    if not stripe.api_key:
+        raise ApiError(503, "Stripe payments are not configured.")
+
+    if quote["price_cents"] <= 0:
+        raise ApiError(400, "The payment amount must be greater than zero.")
+
+    session = stripe.checkout.Session.create(
+        mode="payment",
+        expires_at=int(time.time()) + 1800,
+        payment_method_types=["card"],
+        line_items=[
+            {
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {
+                        "name": line["name"]
+                    },
+                    "unit_amount": int(line["price_cents"]),
+                },
+                "quantity": 1,
+            }
+            for line in quote["lines"]
+        ],
+        metadata={
+            "appointment_id": str(appointment_id)
+        },
+        success_url=STRIPE_SUCCESS_URL,
+        cancel_url=STRIPE_CANCEL_URL,
+    )
+
+    return session
+
+@app.route("/api/customer/stripe/checkout", methods=["POST"])
+def create_customer_stripe_checkout():
+    """Reserve a slot, then create a Stripe-hosted payment session."""
+    data = json_body()
+    check_policy(data)
+    if data.get("replacesId"):
+        raise ApiError(400, "Pay at Shop is required when rescheduling an appointment.")
+    # Reuse the existing booking validation without accepting browser prices.
+    safe_data = dict(data)
+    safe_data["payment"] = "Pay at Shop"
+    safe_data["paymentMethod"] = "shop"
+    check_snapshot_extras(safe_data)
+    day = parse_date(data.get("date"))
+    minute = parse_hhmm(data.get("time"))
+    if day <= shop_today():
+        raise ApiError(400, "Please choose a future appointment date.")
+    notes = validate_notes(data.get("notes"))
+    snapshot = data.get("customer") if isinstance(data.get("customer"), dict) else {}
+    account = current_customer()
+    if account:
+        customer_id = account["customer_id"]
+        profile = customer_profile(account)
+        name = validate_name(snapshot["name"]) if snapshot.get("name") else profile["name"]
+        email = validate_optional_email(snapshot.get("email")) or (account["email"] or None)
+        phone = profile["phone"]
+        guest_token = None
+    else:
+        customer_id = None
+        name = validate_name(snapshot.get("name"))
+        phone = normalize_phone(snapshot.get("phone"))
+        email = validate_optional_email(snapshot.get("email"))
+        guest_token = secrets.token_urlsafe(32)
+
+    quote = quote_from_snapshot(load_catalog(), data.get("services"))
+    if not stripe.api_key:
+        raise ApiError(503, "Stripe payments are not configured.")
+    if quote["price_cents"] <= 0:
+        raise ApiError(400, "The payment amount must be greater than zero.")
+    appointment_id = insert_appointment(
+        staff_id=barber_staff_id(), quote=quote, day=day, minute=minute,
+        customer_id=customer_id, name=name, phone=phone, email=email, notes=notes,
+        payment_status="Pending", payment_method="stripe",
+        policy_version=POLICY_VERSION,
+        guest_token_hash=sha256_hex(guest_token) if guest_token else None,
+        staff_booking=False,
+    )
+    try:
+        session = create_stripe_checkout_session(quote, appointment_id)
+    except Exception:
+        cancel_unpaid_stripe_appointment(appointment_id)
+        logger.exception("Unable to create Stripe Checkout session for appointment %s", appointment_id)
+        raise ApiError(502, "Unable to start payment. Please try again.")
+    response = {"checkoutUrl": session.url}
+    if guest_token:
+        response["guestToken"] = guest_token
+    return jsonify(response), 201
+
+
+@app.route("/api/stripe/webhook", methods=["POST"])
+def stripe_checkout_webhook():
+    """Stripe's signed webhook is the source of truth for payment status."""
+    if not STRIPE_WEBHOOK_SECRET:
+        raise ApiError(503, "Stripe webhook is not configured.")
+    signature = request.headers.get("Stripe-Signature", "")
+    try:
+        event = stripe.Webhook.construct_event(request.get_data(), signature, STRIPE_WEBHOOK_SECRET)
+    except (ValueError, stripe.error.SignatureVerificationError):
+        return jsonify({"error": "Invalid webhook signature."}), 400
+
+    event_type = event["type"]
+    if event_type not in ("checkout.session.completed", "checkout.session.async_payment_succeeded", "checkout.session.expired"):
+        return jsonify({"received": True}), 200
+    session = event["data"]["object"]
+    if session.get("mode") != "payment":
+        return jsonify({"received": True}), 200
+    try:
+        appointment_id = int(session.get("metadata", {}).get("appointment_id", ""))
+    except (ValueError, TypeError):
+        logger.warning("Stripe webhook missing appointment ID")
+        return jsonify({"received": True}), 200
+
+    if event_type == "checkout.session.expired":
+        cancel_unpaid_stripe_appointment(appointment_id)
+    elif session.get("payment_status") == "paid" and session.get("currency", "").lower() == "usd":
+        # Compare the actual charge against the server-side appointment snapshot.
+        amounts = read(
+            "SELECT COALESCE(SUM(price_cents_at_booking), 0) AS amount FROM Appointment_Service WHERE appointment_id = %s",
+            (appointment_id,),
+        )
+        expected = int(amounts[0]["amount"]) if amounts else 0
+        if expected > 0 and int(session.get("amount_total") or -1) == expected:
+            write(
+                """UPDATE Appointment SET payment_status = 'Paid', updated_at = %s
+                   WHERE appointment_id = %s AND payment_method = 'stripe'
+                   AND payment_status = 'Pending' AND status = 'booked'""",
+                (utc_now(), appointment_id),
+            )
+        else:
+            logger.error("Stripe payment amount mismatch for appointment %s", appointment_id)
+    return jsonify({"received": True}), 200
+
 
 def check_policy(data):
     if data.get("policyAccepted") is not True or data.get("policyVersion") != POLICY_VERSION:

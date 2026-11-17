@@ -136,7 +136,17 @@ const MockCustomerApi = (() => {
       if (!previous) appointments.unshift(appointment);
       return result(appointment);
     },
-    cancelAppointment: async ({ id }) => {
+    createStripeCheckout: async request => {
+    const payload = mapAppointmentRequest(request);
+    payload.payment = 'Stripe';
+    payload.paymentMethod = 'stripe';
+    const response = await customerRequest('/api/customer/stripe/checkout', { method: 'POST', body: payload });
+    if (!response?.checkoutUrl || !/^https:\/\/checkout\.stripe\.com\//.test(response.checkoutUrl)) {
+      throw new CustomerApiError('The payment service returned an invalid checkout link.');
+    }
+    return response;
+  },
+  cancelAppointment: async ({ id }) => {
       const appointment = appointments.find(item => item.id === id && item.status === 'confirmed');
       if (!appointment) throw new Error('This appointment cannot be canceled.');
       appointment.status = 'canceled';
@@ -473,6 +483,16 @@ const HttpCustomerApi = {
     const response = await customerRequest(path, { method: request.replacesId ? 'PATCH' : 'POST', body: payload });
     return normalizeAppointment(response);
   },
+  createStripeCheckout: async request => {
+    const payload = mapAppointmentRequest(request);
+    payload.payment = 'Stripe';
+    payload.paymentMethod = 'stripe';
+    const response = await customerRequest('/api/customer/stripe/checkout', { method: 'POST', body: payload });
+    if (!response?.checkoutUrl || !/^https:\/\/checkout\.stripe\.com\//.test(response.checkoutUrl)) {
+      throw new CustomerApiError('The payment service returned an invalid checkout link.');
+    }
+    return response;
+  },
   cancelAppointment: async ({ id }) => normalizeAppointment(await customerRequest(`/api/customer/appointments/${encodeURIComponent(id)}`, { method: 'PATCH', body: { status: 'Cancelled' } })),
   getReviews: () => customerRequest('/api/public/reviews'),
   getInstagramPosts: () => customerRequest('/api/public/instagram'),
@@ -691,9 +711,10 @@ function policyMarkup() {
 }
 function reviewView() {
   const copy = runtimeCopy();
+  const stripePayment = CUSTOMER_CONFIG.mode === 'http' && !state.replacesId ? '<label class="payment-choice"><input type="radio" name="payment" value="stripe"><span>Pay Online with Stripe<small>Secure card payment before your appointment.</small></span></label>' : '';
   const demoPayment = CUSTOMER_CONFIG.mode === 'mock' ? '<label class="payment-choice"><input type="radio" name="payment" value="demo-card"><span>Demo card ···· 4242<small>Simulated payment only. No charge will be made.</small></span><span class="badge">DEMO ONLY</span></label>' : '';
   const prototypeAgreement = CUSTOMER_CONFIG.mode === 'mock' ? '<label class="agreement prototype-agreement"><input type="checkbox" name="acknowledge" required><span>I understand this is an approval prototype. Confirming creates a demo appointment only and does not reserve a time or charge a payment.</span></label>' : '';
-  return bookingLayout('YOUR DETAILS.', 2, `<form id="checkout-form"><h2>CONTACT DETAILS.</h2><p class="subtext">Check your information before confirming. Your phone number is required; email is optional.</p><div class="form-grid">${contactFields(state.profile, 'booking-')}</div><section class="review-section"><h2>HOW WILL YOU PAY?</h2><p class="subtext">${CUSTOMER_CONFIG.mode === 'mock' ? 'No payment is collected in this prototype.' : 'Payment is due after your service.'}</p><label class="payment-choice"><input type="radio" name="payment" value="shop" checked><span>${copy.paymentTitle}<small>${copy.paymentDetail}</small></span></label>${demoPayment}</section>${policyMarkup()}${prototypeAgreement}<p class="error" id="checkout-error" role="alert"></p></form><div class="booking-actions"><a class="text-link" href="#dates">← Change date & time</a></div>`, 'review');
+  return bookingLayout('YOUR DETAILS.', 2, `<form id="checkout-form"><h2>CONTACT DETAILS.</h2><p class="subtext">Check your information before confirming. Your phone number is required; email is optional.</p><div class="form-grid">${contactFields(state.profile, 'booking-')}</div><section class="review-section"><h2>HOW WILL YOU PAY?</h2><p class="subtext">${CUSTOMER_CONFIG.mode === 'mock' ? 'No payment is collected in this prototype.' : 'Choose to pay online or at the shop.'}</p><label class="payment-choice"><input type="radio" name="payment" value="shop" checked><span>${copy.paymentTitle}<small>${copy.paymentDetail}</small></span></label>${stripePayment}${demoPayment}</section>${policyMarkup()}${prototypeAgreement}<p class="error" id="checkout-error" role="alert"></p></form><div class="booking-actions"><a class="text-link" href="#dates">← Change date & time</a></div>`, 'review');
 }
 function confirmationView() {
   const appointment = state.confirmation;
@@ -917,6 +938,12 @@ document.addEventListener('submit', async event => {
     const prototypeAcknowledged = CUSTOMER_CONFIG.mode === 'http' || data.get('acknowledge') === 'on';
     if (!policyAccepted) throw new Error('Please accept the Appointment & Payment Policy before continuing.');
     if (!prototypeAcknowledged) throw new Error('Please accept the prototype acknowledgment before continuing.');
+    if (CUSTOMER_CONFIG.mode === 'http' && data.get('payment') === 'stripe') {
+      const checkout = await HttpCustomerApi.createStripeCheckout({ serviceId: state.serviceId, upgradeIds: state.upgradeIds, service: selectedService(), upgrades: selectedUpgrades(), date: state.date, time: state.time, customer, policyAccepted });
+      if (checkout.guestToken && typeof sessionStorage !== 'undefined') sessionStorage.setItem('rolaz_stripe_guest_token', checkout.guestToken);
+      window.location.assign(checkout.checkoutUrl);
+      return;
+    }
     const completed = await completeBooking(CustomerApi, { serviceId: state.serviceId, upgradeIds: state.upgradeIds, service: selectedService(), upgrades: selectedUpgrades(), date: state.date, time: state.time, customer, paymentMethod: data.get('payment'), policyAccepted, replacesId: state.replacesId }, { refreshProfile: Boolean(state.session) });
     state.confirmation = completed.appointment;
     if (completed.profile) state.profile = completed.profile;
@@ -928,14 +955,25 @@ document.addEventListener('submit', async event => {
     button.textContent = runtimeCopy().confirmButton;
   }
 });
-window.addEventListener('hashchange', () => render(true));
+window.addEventListener('hashchange', () => {
+  if (location.hash === '#payment-success' || location.hash === '#payment-cancel') {
+    const success = location.hash === '#payment-success';
+    main.innerHTML = `<div class="shell confirmation-shell"><section class="confirmation"><h1>${success ? 'PAYMENT SUBMITTED.' : 'PAYMENT NOT COMPLETED.'}</h1><p>${success ? 'Stripe has returned you to the shop. Your payment and appointment are only confirmed after the payment is verified. Contact the shop if you need confirmation.' : 'Your checkout was not completed. Your appointment may be held temporarily until the payment session expires. Please contact the shop before trying again.'}</p><a class="button" href="#home">Back to the shop</a></section></div>`;
+    return;
+  }
+  render(true);
+});
 async function initializeCustomerApp() {
   return runCustomerStartup({
     load: () => loadInitialCustomerData(CustomerApi),
     loading: () => { main.innerHTML = '<div class="shell loading" role="status">Getting the shop ready…</div>'; },
     ready: async data => {
       Object.assign(state, data);
-      await render();
+      if (location.hash === '#payment-success' || location.hash === '#payment-cancel') {
+        window.dispatchEvent(new Event('hashchange'));
+      } else {
+        await render();
+      }
       void refreshReviews();
       void refreshInstagram();
     },
