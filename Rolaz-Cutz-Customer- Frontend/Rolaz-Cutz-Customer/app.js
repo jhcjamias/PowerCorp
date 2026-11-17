@@ -13,6 +13,11 @@ function normalizeOptionalEmail(value) {
   return email;
 }
 
+// Reference photos: same limits as the back end (crud.py MAX_PHOTOS_PER_APPOINTMENT, MAX_PHOTO_BYTES).
+const PHOTO_LIMIT = 3;
+const PHOTO_MAX_BYTES = 8 * 1024 * 1024;
+const PHOTO_TYPES = Object.freeze(['image/jpeg', 'image/png', 'image/webp']);
+
 // Replace this adapter with an HTTP implementation that preserves its Promise contract.
 // All data lives only in memory. No card fields, network requests, or browser storage.
 const MockCustomerApi = (() => {
@@ -142,6 +147,14 @@ const MockCustomerApi = (() => {
       appointment.status = 'canceled';
       return result(appointment);
     },
+    uploadPhoto: async ({ id, file }) => {
+      const appointment = appointments.find(item => item.id === id && item.status === 'confirmed');
+      if (!appointment) throw new Error('That demo appointment can no longer take photos.');
+      if (!file || !PHOTO_TYPES.includes(file.type)) throw new Error('Please upload a JPEG, PNG, or WebP photo.');
+      if ((appointment.referencePhotos ?? 0) >= PHOTO_LIMIT) throw new Error(`You can attach up to ${PHOTO_LIMIT} photos per appointment.`);
+      appointment.referencePhotos = (appointment.referencePhotos ?? 0) + 1;
+      return result({ photos: [] });
+    },
     getReviews: () => result({
       status: 'unavailable', rating: null, totalCount: 0, reviews: [],
       googleUrl: 'https://www.google.com/search?q=Rolaz+Cutz+Barbershop+Katy+reviews',
@@ -215,6 +228,31 @@ async function completeBooking(api, request, { refreshProfile = false } = {}) {
     catch (error) { if (error?.status !== 401) throw error; }
   }
   return { appointment, profile: refreshedProfile };
+}
+
+function validatePhotoSelection(files) {
+  const chosen = Array.from(files ?? []).filter(file => file && file.size > 0);
+  if (chosen.length > PHOTO_LIMIT) return { files: [], error: `Choose up to ${PHOTO_LIMIT} photos.` };
+  const wrongType = chosen.find(file => !PHOTO_TYPES.includes(file.type));
+  if (wrongType) return { files: [], error: `${wrongType.name} isn't a JPEG, PNG, or WebP photo.` };
+  const tooLarge = chosen.find(file => file.size > PHOTO_MAX_BYTES);
+  if (tooLarge) return { files: [], error: `${tooLarge.name} is larger than 8 MB.` };
+  return { files: chosen, error: '' };
+}
+
+// Uploads one at a time after the booking exists. A failed photo never undoes the booking.
+async function uploadReferencePhotos(api, appointment, files) {
+  let uploaded = 0;
+  const failed = [];
+  for (const file of files) {
+    try {
+      await api.uploadPhoto({ id: appointment.id, file, guestToken: appointment.guestToken });
+      uploaded += 1;
+    } catch (error) {
+      failed.push({ name: file.name, message: error?.message ?? 'Upload failed.' });
+    }
+  }
+  return { uploaded, failed };
 }
 
 async function withDisabledControl(control, action) {
@@ -427,10 +465,12 @@ function runtimeCopy(mode = CUSTOMER_CONFIG.mode) {
 
 async function customerRequest(path, options = {}) {
   const url = `${CUSTOMER_CONFIG.apiBaseUrl}${path}`;
-  const headers = { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.headers ?? {}) };
+  // FormData (photo uploads) is sent as-is so the browser sets the multipart boundary.
+  const isForm = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  const headers = { Accept: 'application/json', ...(options.body === undefined || isForm ? {} : { 'Content-Type': 'application/json' }), ...(options.headers ?? {}) };
   let response;
   try {
-    response = await fetch(url, { credentials: 'include', ...options, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
+    response = await fetch(url, { credentials: 'include', ...options, headers, body: options.body === undefined ? undefined : isForm ? options.body : JSON.stringify(options.body) });
   } catch (error) {
     throw new CustomerApiError('Unable to reach the booking service. Please check your connection and try again.', 0, { cause: error?.message ?? 'network error' });
   }
@@ -474,6 +514,11 @@ const HttpCustomerApi = {
     return normalizeAppointment(response);
   },
   cancelAppointment: async ({ id }) => normalizeAppointment(await customerRequest(`/api/customer/appointments/${encodeURIComponent(id)}`, { method: 'PATCH', body: { status: 'Cancelled' } })),
+  uploadPhoto: ({ id, file, guestToken }) => {
+    const form = new FormData();
+    form.append('photo', file, file.name);
+    return customerRequest(`/api/customer/appointments/${encodeURIComponent(id)}/photos`, { method: 'POST', body: form, headers: guestToken ? { 'X-Guest-Token': guestToken } : {} });
+  },
   getReviews: () => customerRequest('/api/public/reviews'),
   getInstagramPosts: () => customerRequest('/api/public/instagram'),
   requestVerificationCode: request => customerRequest('/api/customer/auth/send-code', { method: 'POST', body: request }),
@@ -491,7 +536,7 @@ const HttpCustomerApi = {
 };
 
 const CustomerApi = CUSTOMER_CONFIG.mode === 'http' ? HttpCustomerApi : MockCustomerApi;
-const RolazCustomerCore = Object.freeze({ CUSTOMER_CONFIG, CUSTOMER_SESSION_KEY, GOOD_TO_KNOW, goodToKnowView, normalizePhone, normalizeOptionalEmail, minutesToTime, timeToMinutes, mapAppointmentRequest, normalizeAppointment, runtimeCopy, normalizeReviewsPayload, normalizeInstagramPayload, createLatestOnlyLoader, clearPrivateCustomerState, setCustomerUnauthorizedHandler, completeBooking, withDisabledControl, startupErrorView, runCustomerStartup, loadInitialCustomerData, CustomerApiError, customerRequest, MockCustomerApi, HttpCustomerApi, CustomerApi });
+const RolazCustomerCore = Object.freeze({ CUSTOMER_CONFIG, CUSTOMER_SESSION_KEY, GOOD_TO_KNOW, goodToKnowView, normalizePhone, normalizeOptionalEmail, minutesToTime, timeToMinutes, mapAppointmentRequest, normalizeAppointment, runtimeCopy, normalizeReviewsPayload, normalizeInstagramPayload, createLatestOnlyLoader, clearPrivateCustomerState, setCustomerUnauthorizedHandler, completeBooking, PHOTO_LIMIT, PHOTO_MAX_BYTES, PHOTO_TYPES, validatePhotoSelection, uploadReferencePhotos, withDisabledControl, startupErrorView, runCustomerStartup, loadInitialCustomerData, CustomerApiError, customerRequest, MockCustomerApi, HttpCustomerApi, CustomerApi });
 window.RolazCustomerCore = RolazCustomerCore;
 
 const state = { services: [], upgrades: [], business: null, profile: null, session: null, verification: null, serviceId: null, upgradeIds: [], date: null, time: null, replacesId: null, confirmation: null, renderId: 0 };
@@ -689,17 +734,22 @@ function contactFields(profile, prefix = '', lockPhone = false) {
 function policyMarkup() {
   return `<section class="policy-panel" aria-labelledby="appointment-policy"><div class="policy-heading"><span>PLEASE READ BEFORE CONFIRMING</span><h2 id="appointment-policy">Appointment & Payment Policy</h2></div><div class="policy-grid"><p>If you are unable to attend your appointment or are running late, please call <a href="tel:+18328748680">+1 832-874-8680</a> so we can make arrangements.</p><p>Please cancel or reschedule at least <strong>2 hours before your appointment</strong>.</p><p>If you arrive <strong>more than 5 minutes late</strong>, service may be refused and the <strong>full service fee</strong> may be charged.</p><p>A <strong>no-show, including a no-call/no-show, will be charged the full service price</strong>.</p><p class="cash-note">Cash is still accepted.</p></div><label class="agreement policy-agreement"><input type="checkbox" name="policyAccepted" required><span>I have read and agree to the Appointment & Payment Policy, including the 2-hour cancellation or rescheduling requirement, late-arrival policy, and full-service no-show fee.</span></label></section>`;
 }
+function photoPickerMarkup() {
+  if (state.replacesId) return '';
+  const demoNote = CUSTOMER_CONFIG.mode === 'mock' ? ' In this prototype, photos are counted but not uploaded.' : '';
+  return `<section class="review-section photo-section"><h2>REFERENCE PHOTOS.</h2><p class="subtext">Optional. Add up to ${PHOTO_LIMIT} photos of the look you want: JPEG, PNG, or WebP, up to 8 MB each.${demoNote}</p><label class="field field-full" for="reference-photos">Choose photos<input id="reference-photos" name="photos" type="file" accept="${PHOTO_TYPES.join(',')}" multiple aria-describedby="photo-status"></label><p class="subtext" id="photo-status" aria-live="polite"></p></section>`;
+}
 function reviewView() {
   const copy = runtimeCopy();
   const demoPayment = CUSTOMER_CONFIG.mode === 'mock' ? '<label class="payment-choice"><input type="radio" name="payment" value="demo-card"><span>Demo card ···· 4242<small>Simulated payment only. No charge will be made.</small></span><span class="badge">DEMO ONLY</span></label>' : '';
   const prototypeAgreement = CUSTOMER_CONFIG.mode === 'mock' ? '<label class="agreement prototype-agreement"><input type="checkbox" name="acknowledge" required><span>I understand this is an approval prototype. Confirming creates a demo appointment only and does not reserve a time or charge a payment.</span></label>' : '';
-  return bookingLayout('YOUR DETAILS.', 2, `<form id="checkout-form"><h2>CONTACT DETAILS.</h2><p class="subtext">Check your information before confirming. Your phone number is required; email is optional.</p><div class="form-grid">${contactFields(state.profile, 'booking-')}</div><section class="review-section"><h2>HOW WILL YOU PAY?</h2><p class="subtext">${CUSTOMER_CONFIG.mode === 'mock' ? 'No payment is collected in this prototype.' : 'Payment is due after your service.'}</p><label class="payment-choice"><input type="radio" name="payment" value="shop" checked><span>${copy.paymentTitle}<small>${copy.paymentDetail}</small></span></label>${demoPayment}</section>${policyMarkup()}${prototypeAgreement}<p class="error" id="checkout-error" role="alert"></p></form><div class="booking-actions"><a class="text-link" href="#dates">← Change date & time</a></div>`, 'review');
+  return bookingLayout('YOUR DETAILS.', 2, `<form id="checkout-form"><h2>CONTACT DETAILS.</h2><p class="subtext">Check your information before confirming. Your phone number is required; email is optional.</p><div class="form-grid">${contactFields(state.profile, 'booking-')}</div>${photoPickerMarkup()}<section class="review-section"><h2>HOW WILL YOU PAY?</h2><p class="subtext">${CUSTOMER_CONFIG.mode === 'mock' ? 'No payment is collected in this prototype.' : 'Payment is due after your service.'}</p><label class="payment-choice"><input type="radio" name="payment" value="shop" checked><span>${copy.paymentTitle}<small>${copy.paymentDetail}</small></span></label>${demoPayment}</section>${policyMarkup()}${prototypeAgreement}<p class="error" id="checkout-error" role="alert"></p></form><div class="booking-actions"><a class="text-link" href="#dates">← Change date & time</a></div>`, 'review');
 }
 function confirmationView() {
   const appointment = state.confirmation;
   const details = appointmentDetails(appointment);
   const copy = runtimeCopy();
-  return `<div class="shell confirmation-shell"><section class="confirmation"><div class="confirmation-icon" aria-hidden="true">✓</div><span class="section-code">${esc(appointment.id)} / ${copy.confirmationCode}</span><h1>${copy.confirmationHeading.replace(' ', '<br>')}</h1><p>${copy.confirmationIntro}</p><div class="confirmation-card"><h2>${esc(details.service.name)}</h2><div class="detail-grid"><div><small>DATE & TIME</small><strong>${dateLabel(appointment.date)}<br>${timeLabel(appointment.time)} · Central time</strong></div><div><small>SERVICE</small><strong>${details.duration} minutes · ${money(details.priceCents)}${details.upgrades.length ? `<br>Upgradez: ${details.upgrades.map(item => esc(item.name)).join(' · ')}` : ''}</strong></div><div><small>THE SHOP</small><strong>Rolaz Cutz Barbershop<br>20260 Katy Freeway, Suite 116<br>Katy, TX 77449</strong></div><div><small>PAYMENT</small><strong>${appointment.paymentMethod === 'demo-card' ? 'Demo card ···· 4242' : 'Pay at the Shop · Zelle and Cash Welcome'}${CUSTOMER_CONFIG.mode === 'mock' ? '<br>No payment collected' : ''}</strong></div></div></div><div class="policy-reminder"><strong>Plans changed or running late?</strong><span>Call <a href="tel:+18328748680">+1 832-874-8680</a>. Cancel or reschedule at least 2 hours before the appointment.</span></div><div class="hero-actions"><a href="#account" class="button">View my appointments</a><a href="#home" class="text-link">Back to the shop</a></div>${CUSTOMER_CONFIG.mode === 'mock' ? '<div class="notice">No confirmation email or text is sent from this prototype. Your demo appointment appears in Account until you reload the page.</div>' : ''}</section></div>`;
+  return `<div class="shell confirmation-shell"><section class="confirmation"><div class="confirmation-icon" aria-hidden="true">✓</div><span class="section-code">${esc(appointment.id)} / ${copy.confirmationCode}</span><h1>${copy.confirmationHeading.replace(' ', '<br>')}</h1><p>${copy.confirmationIntro}</p><div class="confirmation-card"><h2>${esc(details.service.name)}</h2><div class="detail-grid"><div><small>DATE & TIME</small><strong>${dateLabel(appointment.date)}<br>${timeLabel(appointment.time)} · Central time</strong></div><div><small>SERVICE</small><strong>${details.duration} minutes · ${money(details.priceCents)}${details.upgrades.length ? `<br>Upgradez: ${details.upgrades.map(item => esc(item.name)).join(' · ')}` : ''}</strong></div><div><small>THE SHOP</small><strong>Rolaz Cutz Barbershop<br>20260 Katy Freeway, Suite 116<br>Katy, TX 77449</strong></div><div><small>PAYMENT</small><strong>${appointment.paymentMethod === 'demo-card' ? 'Demo card ···· 4242' : 'Pay at the Shop · Zelle and Cash Welcome'}${CUSTOMER_CONFIG.mode === 'mock' ? '<br>No payment collected' : ''}</strong></div>${appointment.referencePhotos > 0 ? `<div><small>REFERENCE PHOTOS</small><strong>${appointment.referencePhotos} photo${appointment.referencePhotos === 1 ? '' : 's'} attached</strong></div>` : ''}</div></div>${appointment.photoFailures?.length ? `<div class="notice" role="alert">Your appointment is booked, but ${appointment.photoFailures.length === 1 ? 'one photo' : `${appointment.photoFailures.length} photos`} could not be uploaded (${esc(appointment.photoFailures[0].message)}). Please bring ${appointment.photoFailures.length === 1 ? 'it' : 'them'} to your appointment.</div>` : ''}<div class="policy-reminder"><strong>Plans changed or running late?</strong><span>Call <a href="tel:+18328748680">+1 832-874-8680</a>. Cancel or reschedule at least 2 hours before the appointment.</span></div><div class="hero-actions"><a href="#account" class="button">View my appointments</a><a href="#home" class="text-link">Back to the shop</a></div>${CUSTOMER_CONFIG.mode === 'mock' ? '<div class="notice">No confirmation email or text is sent from this prototype. Your demo appointment appears in Account until you reload the page.</div>' : ''}</section></div>`;
 }
 function appointmentCard(appointment) {
   const details = appointmentDetails(appointment);
@@ -783,6 +833,11 @@ document.addEventListener('change', event => {
     state.date = null;
     state.time = null;
     document.querySelector('#booking-summary').innerHTML = summaryView('services');
+  } else if (event.target.name === 'photos') {
+    const status = document.querySelector('#photo-status');
+    const { files, error } = validatePhotoSelection(event.target.files);
+    if (error) event.target.value = '';
+    if (status) status.textContent = error || (files.length ? `${files.length} photo${files.length === 1 ? '' : 's'} ready to attach.` : '');
   }
 });
 document.addEventListener('click', async event => {
@@ -917,8 +972,15 @@ document.addEventListener('submit', async event => {
     const prototypeAcknowledged = CUSTOMER_CONFIG.mode === 'http' || data.get('acknowledge') === 'on';
     if (!policyAccepted) throw new Error('Please accept the Appointment & Payment Policy before continuing.');
     if (!prototypeAcknowledged) throw new Error('Please accept the prototype acknowledgment before continuing.');
+    const photoSelection = validatePhotoSelection(state.replacesId ? [] : data.getAll('photos'));
+    if (photoSelection.error) throw new Error(photoSelection.error);
     const completed = await completeBooking(CustomerApi, { serviceId: state.serviceId, upgradeIds: state.upgradeIds, service: selectedService(), upgrades: selectedUpgrades(), date: state.date, time: state.time, customer, paymentMethod: data.get('payment'), policyAccepted, replacesId: state.replacesId }, { refreshProfile: Boolean(state.session) });
     state.confirmation = completed.appointment;
+    if (photoSelection.files.length) {
+      button.textContent = 'Uploading photos…';
+      const photos = await uploadReferencePhotos(CustomerApi, completed.appointment, photoSelection.files);
+      state.confirmation = { ...completed.appointment, referencePhotos: (completed.appointment.referencePhotos ?? 0) + photos.uploaded, photoFailures: photos.failed };
+    }
     if (completed.profile) state.profile = completed.profile;
     state.replacesId = null;
     go('confirmation');

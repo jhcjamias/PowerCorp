@@ -17,6 +17,7 @@ import {
   POLICY_HOURS,
 } from '../utils'
 import StatusBadge from './StatusBadge.vue'
+import { listAppointmentPhotos } from '../appointmentsService'
 
 const props = defineProps({
   appointment: { type: Object, default: null },
@@ -57,12 +58,37 @@ function backToView() {
   nextTick(() => heading.value?.focus())
 }
 
+// Reference photos load separately: their signed links expire, so fetch them when opened.
+const photos = ref([])
+const photosLoading = ref(false)
+const photosError = ref('')
+let photoRequest = 0
+
+async function loadPhotos() {
+  const appointment = props.appointment
+  const request = ++photoRequest
+  photos.value = []
+  photosError.value = ''
+  if (!appointment || !(appointment.referencePhotos > 0)) return
+  photosLoading.value = true
+  try {
+    const loaded = await listAppointmentPhotos(appointment.id, appointment.referencePhotos)
+    if (request === photoRequest) photos.value = loaded
+  } catch (err) {
+    if (request === photoRequest) photosError.value = err?.message || 'Could not load the photos.'
+  } finally {
+    if (request === photoRequest) photosLoading.value = false
+  }
+}
+
 // A different appointment was picked: start fresh.
 watch(
   () => props.appointment?.id,
   () => {
     mode.value = 'view'
+    loadPhotos()
   },
+  { immediate: true },
 )
 
 // An action finished without an error: go back to the details.
@@ -132,13 +158,21 @@ watch(
 
       <div class="photos">
         <h3>Reference photos</h3>
-        <ul v-if="appointment.referencePhotos > 0">
-          <li v-for="n in appointment.referencePhotos" :key="n">
-            <span class="sr-only">Reference photo {{ n }}</span>
-            <span aria-hidden="true">Photo {{ n }}</span>
+        <p v-if="!(appointment.referencePhotos > 0)" class="muted">
+          The customer did not attach any photos.
+        </p>
+        <p v-else-if="photosLoading" class="muted" role="status">Loading photos…</p>
+        <p v-else-if="photosError" class="muted" role="alert">
+          {{ photosError }}
+          <button type="button" class="link-button" @click="loadPhotos">Try again</button>
+        </p>
+        <ul v-else>
+          <li v-for="(photo, index) in photos" :key="photo.id">
+            <a :href="photo.url" target="_blank" rel="noopener noreferrer">
+              <img :src="photo.url" :alt="`Reference photo ${index + 1} from the customer`" />
+            </a>
           </li>
         </ul>
-        <p v-else class="muted">The customer did not attach any photos.</p>
       </div>
 
       <p v-if="appointment.notes" class="line"><strong>Notes:</strong> {{ appointment.notes }}</p>
@@ -351,16 +385,32 @@ h3 {
   list-style: none;
 }
 
-.photos li {
-  display: grid;
-  place-items: center;
-  width: 84px;
-  height: 84px;
-  border: 1.5px dashed var(--rc-line);
+.photos li a {
+  display: block;
+  width: 96px;
+  height: 96px;
+  overflow: hidden;
+  border: 1.5px solid var(--rc-line);
   border-radius: 8px;
   background: var(--rc-surface);
-  color: var(--rc-muted);
-  font-size: 12px;
+}
+
+.photos li img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.photos .link-button {
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 .error {

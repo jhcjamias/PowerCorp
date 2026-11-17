@@ -61,7 +61,9 @@ Responses:
 - `id`: a string (the front end never does math on it).
 - `status`: exactly `"Booked"`, `"Completed"` or `"Cancelled"`.
 - Total and end time are calculated by the front end from `services` (sum of price / duration).
-- `referencePhotos` is a count for now. If photos get real URLs later, we will change this to a list.
+- `referencePhotos` is the number of photos the customer attached. The photos themselves come from
+  `GET /api/appointments/:id/photos` → `{ "photos": [{ "id", "url", "uploadedAt" }] }`. Each `url` is a
+  signed link that works for about 15 minutes, so the detail panel loads them when it opens.
 - Bookings made on the customer site must use this same shape, with `status: "Booked"`.
 
 ### List

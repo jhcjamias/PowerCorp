@@ -21,6 +21,9 @@ Environment variables (all optional in development):
     POLICY_VERSION          current Appointment & Payment Policy version
     BARBER_STAFF_ID         Staff row that owns the single chair
     TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_VERIFY_SERVICE_SID
+    UPLOADS_BUCKET          private S3 bucket for reference photos (development without it
+                            saves photos in Back End/uploads_local/)
+    AWS_REGION              region of UPLOADS_BUCKET (default us-east-1)
     GOOGLE_PLACES_API_KEY / GOOGLE_PLACE_ID / GOOGLE_REVIEWS_URL
     INSTAGRAM_ACCESS_TOKEN
 """
@@ -28,6 +31,7 @@ Environment variables (all optional in development):
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -38,16 +42,21 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from functools import wraps
 from zoneinfo import ZoneInfo
 
+import boto3
 import flask
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import BotoCoreError, ClientError
 from flask import g, jsonify, request
 from flask_cors import CORS
 from mysql.connector import Error
+from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -132,6 +141,20 @@ GOOGLE_REVIEWS_URL = os.getenv(
     "https://www.google.com/maps/search/?api=1&query=Rolaz%20Cutz%20Barbershop%20Katy%20TX",
 )
 INSTAGRAM_PROFILE_URL = "https://www.instagram.com/rolaz_cutz/"
+
+# Reference photos customers attach to a booking. Production stores them in a
+# private S3 bucket; the browser only ever gets short-lived signed links.
+UPLOADS_BUCKET = os.getenv("UPLOADS_BUCKET", "").strip()
+UPLOADS_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
+LOCAL_UPLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads_local")
+MAX_PHOTOS_PER_APPOINTMENT = 3
+MAX_PHOTO_BYTES = 8 * 1024 * 1024
+PHOTO_MAX_EDGE = 2048            # longest side after resizing, in pixels
+PHOTO_URL_SECONDS = 15 * 60      # how long a signed photo link works
+ALLOWED_PHOTO_FORMATS = {"JPEG", "PNG", "WEBP"}
+PHOTO_KEY_PATTERN = re.compile(r"appointments/\d+/[0-9a-f]{32}\.jpg")
+Image.MAX_IMAGE_PIXELS = 40_000_000  # refuse "decompression bomb" images early
+
 PROVIDER_CACHE_SECONDS = 15 * 60
 PROVIDER_FAILURE_CACHE_SECONDS = 60
 
@@ -156,6 +179,8 @@ if "*" in ALLOWED_ORIGINS:
 app = flask.Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 app.config["DEBUG"] = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+# Largest request body accepted (one photo plus form overhead). Bigger requests get a 413.
+app.config["MAX_CONTENT_LENGTH"] = MAX_PHOTO_BYTES + 1024 * 1024
 
 proxy_hops = int(os.getenv("TRUST_PROXY_HOPS", "0"))
 if proxy_hops > 0:
@@ -172,9 +197,14 @@ DB_SETTINGS = (
     os.getenv("DB_NAME") or my_creds.dbName,
     int(os.getenv("DB_PORT", "3306")),
 )
+if not all(DB_SETTINGS[:4]):
+    message = ("Database settings are missing. Set DB_HOST, DB_USER, DB_PASSWORD and DB_NAME, "
+               "or create Back End/creds_local.py for local development.")
+    if IS_PRODUCTION:
+        raise RuntimeError(message)
+    logger.warning(message)
 
 
-<<<<<<< HEAD
 class ApiError(Exception):
     """An error with a status code and a plain-English message for the client."""
 
@@ -248,10 +278,6 @@ def is_duplicate_key(error):
 # ---------------------------------------------------------------------------
 # General helpers
 # ---------------------------------------------------------------------------
-=======
-<<<<<<< HEAD
-# ---------- helpers ----------
->>>>>>> 5d06343 (basic structure of sql queries written)
 
 def clean(rows):
     """Convert MySQL values into JSON-serializable Python values."""
@@ -476,6 +502,7 @@ def handle_http_error(error):
     messages = {
         404: "That endpoint or record was not found.",
         405: "That HTTP method is not allowed for this endpoint.",
+        413: f"That file is too large. Photos must be {MAX_PHOTO_BYTES // (1024 * 1024)} MB or smaller.",
     }
     return jsonify({"message": messages.get(error.code, error.description)}), error.code
 
@@ -1295,6 +1322,23 @@ def customer_verify_code():
             (now, customer["customer_id"]),
         )
 
+    # Link upcoming guest bookings made on the customer site with this verified
+    # phone. Only rows with a guest token count: staff-entered bookings have none
+    # and stay with the shop. Past and cancelled bookings are left alone, so a
+    # mistyped number can't put someone else's visit history in this account.
+    write(
+        """
+        UPDATE Appointment
+        SET customer_id = %s
+        WHERE customer_id IS NULL
+          AND guest_token_hash IS NOT NULL
+          AND status = 'booked'
+          AND start_time > %s
+          AND customer_phone = %s
+        """,
+        (customer["customer_id"], now, phone),
+    )
+
     response = jsonify({"authenticated": True, "customer": customer_profile(customer)})
     start_customer_session(response, customer["customer_id"])
     return response, 200
@@ -1527,6 +1571,187 @@ def update_customer_appointment(appointment_id):
         raise ApiError(400, "Send a new date and time to reschedule, or status Cancelled to cancel.")
 
     return jsonify(appointment_json(fetch_appointment(appointment_id), "customer")), 200
+
+
+# ---------------------------------------------------------------------------
+# Reference photos (customer uploads, admin views)
+# ---------------------------------------------------------------------------
+# Every photo is re-encoded as a JPEG before it is stored. That proves it is a
+# real image, caps its size, and drops all metadata, including the GPS location
+# phones save inside photos. The database keeps only the storage key; links
+# handed to browsers are signed and expire after PHOTO_URL_SECONDS.
+
+_s3_client = None
+
+
+def photo_storage():
+    """'s3', 'local' (development only), or None when uploads are not configured."""
+    if UPLOADS_BUCKET:
+        return "s3"
+    if not IS_PRODUCTION:
+        return "local"
+    return None
+
+
+def s3_client():
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client(
+            "s3",
+            region_name=UPLOADS_REGION,
+            config=BotoConfig(signature_version="s3v4", connect_timeout=5, read_timeout=20,
+                              retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _s3_client
+
+
+def store_photo(key, data):
+    if photo_storage() == "s3":
+        s3_client().put_object(Bucket=UPLOADS_BUCKET, Key=key, Body=data, ContentType="image/jpeg")
+        return
+    path = os.path.join(LOCAL_UPLOADS_DIR, key)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as file:
+        file.write(data)
+
+
+def delete_stored_photo(key):
+    """Best effort: a leftover file is harmless, a failed request is not."""
+    try:
+        if photo_storage() == "s3":
+            s3_client().delete_object(Bucket=UPLOADS_BUCKET, Key=key)
+        elif PHOTO_KEY_PATTERN.fullmatch(key):
+            os.remove(os.path.join(LOCAL_UPLOADS_DIR, key))
+    except (BotoCoreError, ClientError, OSError):
+        logger.exception("Could not delete stored photo %s", key)
+
+
+def photo_url(key):
+    if photo_storage() == "s3":
+        return s3_client().generate_presigned_url(
+            "get_object", Params={"Bucket": UPLOADS_BUCKET, "Key": key}, ExpiresIn=PHOTO_URL_SECONDS,
+        )
+    return f"{request.host_url.rstrip('/')}/api/dev/uploads/{key}"
+
+
+def prepare_photo(upload):
+    """Validate an uploaded file and return it re-encoded as JPEG bytes."""
+    if upload is None or not upload.filename:
+        raise ApiError(400, "Please choose a photo to upload.")
+    raw = upload.stream.read(MAX_PHOTO_BYTES + 1)
+    if len(raw) > MAX_PHOTO_BYTES:
+        raise ApiError(413, f"That photo is too large. Photos must be {MAX_PHOTO_BYTES // (1024 * 1024)} MB or smaller.")
+    if not raw:
+        raise ApiError(400, "That file is empty. Please choose a photo.")
+    unreadable = "That file isn't a photo we can read. Please upload a JPEG, PNG, or WebP image."
+    try:
+        with Image.open(io.BytesIO(raw)) as original:
+            if original.format not in ALLOWED_PHOTO_FORMATS:
+                raise ApiError(415, "Please upload a JPEG, PNG, or WebP photo.")
+            image = ImageOps.exif_transpose(original)  # keep phone photos the right way up
+            image.thumbnail((PHOTO_MAX_EDGE, PHOTO_MAX_EDGE))
+            if image.mode in ("RGBA", "LA", "P"):
+                image = image.convert("RGBA")
+                background = Image.new("RGB", image.size, (255, 255, 255))
+                background.paste(image, mask=image.getchannel("A"))
+                image = background
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+            output = io.BytesIO()
+            image.save(output, "JPEG", quality=85, optimize=True)  # saved without EXIF metadata
+    except ApiError:
+        raise
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError, SyntaxError):
+        raise ApiError(400, unreadable)
+    return output.getvalue()
+
+
+def photos_json(appointment_id):
+    rows = read(
+        "SELECT upload_id, file_url, uploaded_at FROM User_Upload "
+        "WHERE appointment_id = %s ORDER BY upload_id",
+        (appointment_id,),
+    )
+    if photo_storage() is None:
+        return []
+    return [{
+        "id": str(row["upload_id"]),
+        "url": photo_url(row["file_url"]),
+        "uploadedAt": row["uploaded_at"].strftime("%Y-%m-%dT%H:%M:%SZ"),
+    } for row in rows]
+
+
+def require_photo_storage():
+    if photo_storage() is None:
+        raise ApiError(503, "Photo uploads are temporarily unavailable. Please bring your photo to the appointment.")
+
+
+@app.route("/api/customer/appointments/<int:appointment_id>/photos", methods=["GET"])
+def list_customer_photos(appointment_id):
+    authorize_customer_change(appointment_id, {})
+    return jsonify({"photos": photos_json(appointment_id)}), 200
+
+
+@app.route("/api/customer/appointments/<int:appointment_id>/photos", methods=["POST"])
+def upload_customer_photo(appointment_id):
+    """Multipart form with one file in the field "photo". Guests send X-Guest-Token."""
+    authorize_customer_change(appointment_id, {})
+    require_photo_storage()
+    data = prepare_photo(request.files.get("photo"))
+
+    key = f"appointments/{appointment_id}/{uuid.uuid4().hex}.jpg"
+    stored = False
+    try:
+        with transaction():
+            lock_booked_appointment(appointment_id)  # also serializes concurrent uploads
+            owner = read(
+                "SELECT a.customer_id, COUNT(u.upload_id) AS photos FROM Appointment a "
+                "LEFT JOIN User_Upload u ON u.appointment_id = a.appointment_id "
+                "WHERE a.appointment_id = %s GROUP BY a.appointment_id",
+                (appointment_id,),
+            )[0]
+            if owner["photos"] >= MAX_PHOTOS_PER_APPOINTMENT:
+                raise ApiError(409, f"You can attach up to {MAX_PHOTOS_PER_APPOINTMENT} photos per appointment.")
+            store_photo(key, data)
+            stored = True
+            write(
+                "INSERT INTO User_Upload (customer_id, appointment_id, file_url, uploaded_at) "
+                "VALUES (%s, %s, %s, %s)",
+                (owner["customer_id"], appointment_id, key, utc_now()),
+                commit=False,
+            )
+    except (BotoCoreError, ClientError):
+        logger.exception("Storing photo %s failed.", key)
+        raise ApiError(503, "We couldn't save that photo right now. Please try again.")
+    except Exception:
+        if stored:
+            delete_stored_photo(key)  # the database row was rolled back
+        raise
+    return jsonify({"photos": photos_json(appointment_id)}), 201
+
+
+@app.route("/api/customer/appointments/<int:appointment_id>/photos/<int:upload_id>", methods=["DELETE"])
+def delete_customer_photo(appointment_id, upload_id):
+    authorize_customer_change(appointment_id, {})
+    with transaction():
+        lock_booked_appointment(appointment_id)
+        rows = read(
+            "SELECT file_url FROM User_Upload WHERE upload_id = %s AND appointment_id = %s",
+            (upload_id, appointment_id),
+        )
+        if not rows:
+            raise ApiError(404, "Photo not found.")
+        write("DELETE FROM User_Upload WHERE upload_id = %s", (upload_id,), commit=False)
+    delete_stored_photo(rows[0]["file_url"])
+    return "", 204
+
+
+@app.route("/api/dev/uploads/<path:key>", methods=["GET"])
+def serve_local_photo(key):
+    """Development only: serves photos saved in uploads_local/ when no bucket is set."""
+    if photo_storage() != "local" or not PHOTO_KEY_PATTERN.fullmatch(key):
+        raise ApiError(404, "Photo not found.")
+    return flask.send_from_directory(LOCAL_UPLOADS_DIR, key, mimetype="image/jpeg")
 
 
 # ---------------------------------------------------------------------------
@@ -1768,10 +1993,9 @@ def admin_logout():
 
 
 # ---------------------------------------------------------------------------
-# Admin "Forgot password": each admin has a private 6-digit PIN (set by the shop owner
-# with 003_admin_pin.sql or set_admin_pin.py). Username + PIN lets the admin choose a new password, which is
-# saved in the Staff table. No email or text message is needed.
-# Needs the Staff columns from migrations/003_admin_pin.sql.
+# Admin "Forgot password": each admin has a private 6-digit PIN, set by the shop owner
+# with set_admin_pin.py and stored only as a hash (Staff.pin_hash). Username + PIN lets the
+# admin choose a new password, which is saved in the Staff table. No email or text is needed.
 # ---------------------------------------------------------------------------
 
 PIN_MAX_ATTEMPTS = 5
@@ -1794,7 +2018,7 @@ def admin_reset_password():
     bad_pin = "Username or PIN is incorrect."
 
     rows = read(
-        "SELECT staff_id, role, pin, pin_failed_attempts, pin_locked_until FROM Staff "
+        "SELECT staff_id, role, pin_hash, pin_failed_attempts, pin_locked_until FROM Staff "
         "WHERE LOWER(username) = LOWER(%s) LIMIT 1",
         (username.strip(),),
     )
@@ -1810,9 +2034,10 @@ def admin_reset_password():
               (staff["staff_id"],))
         staff["pin_failed_attempts"] = 0
 
-    # The PIN typed in is compared with the PIN saved in the Staff table (same time for any username).
-    has_pin = bool(staff and staff["role"] == "admin" and staff["pin"])
-    pin_ok = hmac.compare_digest(str(staff["pin"]) if has_pin else "------", pin)
+    # The PIN typed in is checked against the saved hash. Unknown usernames are checked
+    # against a dummy hash so the response takes the same time either way.
+    has_pin = bool(staff and staff["role"] == "admin" and staff["pin_hash"])
+    pin_ok = check_password_hash(staff["pin_hash"] if has_pin else _DUMMY_PASSWORD_HASH, pin)
     if not has_pin or not pin_ok:
         if has_pin:
             # Count the wrong try in the database; lock the account after too many.
@@ -1850,6 +2075,13 @@ def admin_list_appointments():
 @require_admin
 def admin_get_appointment(appointment_id):
     return jsonify(appointment_json(fetch_appointment(appointment_id), "admin")), 200
+
+
+@app.route("/api/appointments/<int:appointment_id>/photos", methods=["GET"])
+@require_admin
+def admin_list_photos(appointment_id):
+    fetch_appointment(appointment_id)  # 404 when the appointment does not exist
+    return jsonify({"photos": photos_json(appointment_id)}), 200
 
 
 @app.route("/api/appointments", methods=["POST"])
@@ -2233,195 +2465,9 @@ def update_cart_item():
 # Run development server only when this file is executed directly
 # ---------------------------------------------------------------------------
 
-<<<<<<< HEAD
 if __name__ == "__main__":
     app.run(
         host="127.0.0.1",
         port=int(os.getenv("PORT", "5000")),
         debug=app.config["DEBUG"],
     )
-=======
-    rows = execute_read_query(conn, """
-        SELECT staff_id, TIMESTAMPDIFF(MINUTE, start_time, end_time) AS minutes
-        FROM Appointment WHERE appointment_id = %s AND status = 'booked'
-    """, (appt_id,))
-    if not rows:
-        return jsonify({'error': 'no booked appointment with that id'}), 404
-
-    new_end = new_start + timedelta(minutes=rows[0]['minutes'])
-    if has_conflict(rows[0]['staff_id'], new_start, new_end, exclude_appt_id=appt_id):
-        return jsonify({'error': 'SLOT UNAVAILABLE'}), 409
-
-    execute_query(conn, "UPDATE Appointment SET start_time = %s, end_time = %s "
-                        "WHERE appointment_id = %s", (new_start, new_end, appt_id))
-    return jsonify({'confirmation_number': f"BB-{appt_id:06d}",
-                    'appointment_date': new_start.strftime("%Y-%m-%d"),
-                    'appointment_time': new_start.strftime("%H:%M:%S")})
-
-
-# 6c. Cancel appointment
-@app.route('/api/appointments/<int:appt_id>/cancel', methods=['POST'])
-def cancel_appointment(appt_id):
-    affected, _ = execute_query(conn, "UPDATE Appointment SET status = 'canceled' "
-                                      "WHERE appointment_id = %s AND status = 'booked'", (appt_id,))
-    if affected == 0:
-        return jsonify({'error': 'no booked appointment with that id'}), 404
-    return jsonify({'canceled': f"BB-{appt_id:06d}"})
-
-
-# 7. View appointment history
-@app.route('/api/customers/<int:customer_id>/appointments', methods=['GET'])
-def appointment_history(customer_id):
-    rows = execute_read_query(conn, """
-        SELECT a.customer_id,
-               DATE(a.start_time) AS appointment_date,
-               TIME(a.start_time) AS appointment_time,
-               sv.name AS service_name,
-               aps.price_at_booking AS cost,
-               COALESCE(p.status, 'unpaid') AS payment_status
-        FROM Appointment a
-        JOIN Appointment_Service aps ON a.appointment_id = aps.appointment_id
-        JOIN Service sv ON aps.service_id = sv.service_id
-        LEFT JOIN Payment p ON p.appointment_id = a.appointment_id
-        WHERE a.customer_id = %s
-        ORDER BY a.start_time DESC
-    """, (customer_id,))
-    return jsonify(clean(rows))
-
-
-# 8. Delete customer and everything tied to them (all-or-nothing)
-@app.route('/api/customers/<int:customer_id>', methods=['DELETE'])
-def delete_customer(customer_id):
-    statements = [
-        "DELETE FROM Review WHERE customer_id = %s",
-        "DELETE FROM User_Upload WHERE customer_id = %s",
-        """DELETE FROM Payment
-           WHERE order_id IN (SELECT order_id FROM Orders WHERE customer_id = %s)
-              OR appointment_id IN (SELECT appointment_id FROM Appointment WHERE customer_id = %s)""",
-        "DELETE FROM Order_Item WHERE order_id IN (SELECT order_id FROM Orders WHERE customer_id = %s)",
-        "DELETE FROM Orders WHERE customer_id = %s",
-        "DELETE FROM Cart_Item WHERE cart_id IN (SELECT cart_id FROM Cart WHERE customer_id = %s)",
-        "DELETE FROM Cart WHERE customer_id = %s",
-        """DELETE FROM Appointment_Service
-           WHERE appointment_id IN (SELECT appointment_id FROM Appointment WHERE customer_id = %s)""",
-        "DELETE FROM Appointment WHERE customer_id = %s",
-        "DELETE FROM Customer WHERE customer_id = %s",
-    ]
-    cursor = conn.cursor()
-    try:
-        for sql in statements:
-            cursor.execute(sql, (customer_id,) * sql.count('%s'))
-        customer_deleted = cursor.rowcount  # rowcount of the final statement
-        if customer_deleted == 0:
-            conn.rollback()
-            return jsonify({'error': 'customer not found'}), 404
-        conn.commit()
-        return jsonify({'deleted_customer_id': customer_id})
-    except Error:
-        conn.rollback()
-        raise
-    finally:
-        cursor.close()
-
-app.run()
-=======
-#####################################################
-#                                                   #
-#                                                   #
-#                  CREATE FUNCTIONS                 #
-#                                                   #
-#                                                   #
-#####################################################
-
-#pending update
-@app.route('/create', methods=['POST'])
-def create():
-    data = request.get_json()
-    name = data['name']
-    email = data['email']
-    phone = data['phone']
-    address = data['address']
-    
-    query = f"INSERT INTO users (name, email, phone, address) VALUES ('{name}', '{email}', '{phone}', '{address}')"
-    
-    try:
-        execute_query(conn, query)
-        return jsonify({"message": "User created successfully"}), 201
-    except Error as e:
-        return jsonify({"error": str(e)}), 400
-
-
-
-#####################################################
-#                                                   #
-#                                                   #
-#                  READ FUNCTIONS                   #
-#                                                   #
-#                                                   #
-#####################################################
-
-#pending update
-@app.route('/read', methods=['GET'])
-def read():
-    query = "SELECT * FROM users"
-    
-    try:
-        result = execute_read_query(conn, query)
-        return jsonify(result), 200
-    except Error as e:
-        return jsonify({"error": str(e)}), 400
-
-
-
-#####################################################
-#                                                   #
-#                                                   #
-#                  UPDATE FUNCTIONS                 #
-#                                                   #
-#                                                   #
-#####################################################
-
-#pending update
-@app.route('/update', methods=['PUT'])
-def update():
-    data = request.get_json()
-    user_id = data['id']
-    name = data['name']
-    email = data['email']
-    phone = data['phone']
-    address = data['address']
-    
-    query = f"UPDATE users SET name='{name}', email='{email}', phone='{phone}', address='{address}' WHERE id={user_id}"
-    
-    try:
-        execute_query(conn, query)
-        return jsonify({"message": "User updated successfully"}), 200
-    except Error as e:
-        return jsonify({"error": str(e)}), 400
-
-
-
-#####################################################
-#                                                   #
-#                                                   #
-#               DEACTIVATE FUNCTIONS                #
-#                                                   #
-#                                                   #
-#####################################################
-
-#this is a destructive operation. can be changed to a soft delete by adding an active column to the table and setting it to 0 instead of deleting the record
-
-@app.route('/deactivate', methods=['PUT'])
-def deactivate():
-    data = request.get_json()
-    user_id = data['id']
-    
-    query = f"UPDATE users SET active=0 WHERE id={user_id}"
-    
-    try:
-        execute_query(conn, query)
-        return jsonify({"message": "User deactivated successfully"}), 200
-    except Error as e:
-        return jsonify({"error": str(e)}), 400
->>>>>>> 9e65def (basic structure of sql queries written)
->>>>>>> 5d06343 (basic structure of sql queries written)

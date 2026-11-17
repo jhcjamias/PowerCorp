@@ -1,0 +1,10 @@
+# Files the EB CLI leaves out of the deploy bundle. With this file present,
+# "eb deploy" zips this folder directly (uncommitted changes included) instead of using git.
+creds_local.py
+uploads_local/
+__pycache__/
+*.pyc
+tests/
+migrations/
+.venv/
+.DS_Store
