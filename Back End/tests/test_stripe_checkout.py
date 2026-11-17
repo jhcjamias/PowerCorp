@@ -254,6 +254,7 @@ class StripeCheckoutTest(StripeBase):
         charged = sum(item["price_data"]["unit_amount"] for item in params["line_items"])
         self.assertEqual(charged, REGULAR_CENTS + SCISSOR_CENTS, "prices come from the catalog")
         self.assertEqual(params["metadata"], {"appointment_id": checkout["appointmentId"]})
+        self.assertNotIn("payment_method_types", params, "Stripe rejects it; methods are set in the Dashboard")
         self.assertEqual(params["customer_email"], "pat@example.com")
         self.assertEqual(key, f"checkout-appointment-{checkout['appointmentId']}")
         self.assertAlmostEqual(params["expires_at"] - time.time(), crud.STRIPE_CHECKOUT_SECONDS, delta=5)

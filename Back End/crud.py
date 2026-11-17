@@ -1853,8 +1853,9 @@ def create_customer_stripe_checkout():
     appointment_id = insert_customer_booking(booking, AWAITING_PAYMENT, "stripe")
     reference = {"appointment_id": str(appointment_id)}
     params = {
+        # Payment methods (card, Apple Pay, ...) are chosen in the Stripe
+        # Dashboard; Stripe no longer accepts payment_method_types here.
         "mode": "payment",
-        "payment_method_types": ["card"],
         "expires_at": int(time.time()) + STRIPE_CHECKOUT_SECONDS,
         "client_reference_id": str(appointment_id),
         "metadata": reference,
