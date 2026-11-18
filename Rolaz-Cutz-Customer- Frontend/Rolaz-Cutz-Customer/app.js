@@ -369,7 +369,11 @@ function createLatestOnlyLoader(normalize) {
 const suppliedCustomerConfig = window.ROLAZ_CUSTOMER_CONFIG ?? {};
 const CUSTOMER_CONFIG = Object.freeze({
   mode: suppliedCustomerConfig.mode === 'http' ? 'http' : 'mock',
-  apiBaseUrl: String(suppliedCustomerConfig.apiBaseUrl ?? '').replace(/\/$/, '')
+  apiBaseUrl: String(suppliedCustomerConfig.apiBaseUrl ?? '').replace(/\/$/, ''),
+  bookingWindowDays: Math.max(
+    1,
+    Math.min(60, Number(suppliedCustomerConfig.bookingWindowDays) || 30)
+  )
 });
 
 class CustomerApiError extends Error {
@@ -626,7 +630,12 @@ const mapUrl = 'https://www.openstreetmap.org/export/embed.html?bbox=-95.728%2C2
 function nextDates() {
   const shopDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago' }).format(new Date());
   const start = dateObject(shopDate);
-  return Array.from({ length: 14 }, (_, index) => { const day = new Date(start); day.setDate(day.getDate() + index + 1); return dateKey(day); });
+
+  return Array.from({ length: CUSTOMER_CONFIG.bookingWindowDays }, (_, index) => {
+    const day = new Date(start);
+    day.setDate(day.getDate() + index + 1);
+    return dateKey(day);
+  });
 }
 function announce(message) {
   const toast = document.querySelector('#toast');

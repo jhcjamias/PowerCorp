@@ -28,7 +28,7 @@ Environment variables (all optional in development):
     STRIPE_WEBHOOK_SECRET   signing secret (whsec_...) of the /api/stripe/webhook endpoint
     SITE_URL                customer site address Stripe returns to, e.g. https://rolazcutzbarbershop.com
     GOOGLE_PLACES_API_KEY / GOOGLE_PLACE_ID / GOOGLE_REVIEWS_URL
-    INSTAGRAM_ACCESS_TOKEN
+    INSTAGRAM_ACCESS_TOKEN / INSTAGRAM_USER_ID / INSTAGRAM_GRAPH_VERSION
 """
 
 import base64
@@ -142,9 +142,13 @@ GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "")
 GOOGLE_PLACE_ID = os.getenv("GOOGLE_PLACE_ID", "")
 GOOGLE_REVIEWS_URL = os.getenv(
     "GOOGLE_REVIEWS_URL",
-    "https://www.google.com/maps/search/?api=1&query=Rolaz%20Cutz%20Barbershop%20Katy%20TX",
+    "https://www.google.com/maps/place/Rolaz+Cutz+Barbershop/",
 )
 INSTAGRAM_PROFILE_URL = "https://www.instagram.com/rolaz_cutz/"
+INSTAGRAM_USER_ID = os.getenv("INSTAGRAM_USER_ID", "me").strip() or "me"
+INSTAGRAM_GRAPH_VERSION = os.getenv("INSTAGRAM_GRAPH_VERSION", "v27.0").strip()
+if not re.fullmatch(r"v\d+\.\d+", INSTAGRAM_GRAPH_VERSION):
+    raise RuntimeError("INSTAGRAM_GRAPH_VERSION must look like v27.0.")
 
 # Reference photos customers attach to a booking. Production stores them in a
 # private S3 bucket; the browser only ever gets short-lived signed links.
@@ -2178,6 +2182,9 @@ def load_google_reviews():
         "message": "Live Google reviews are temporarily unavailable.",
     }
     if not GOOGLE_PLACES_API_KEY or not GOOGLE_PLACE_ID:
+        logger.warning(
+            "Google reviews are disabled. Set GOOGLE_PLACES_API_KEY and GOOGLE_PLACE_ID."
+        )
         return unavailable, False
     try:
         place = http_get_json(
@@ -2225,7 +2232,10 @@ def public_reviews():
 # The long-lived Instagram token is refreshed in memory about once a day.
 # Long-lived tokens last 60 days; update INSTAGRAM_ACCESS_TOKEN before then
 # or persist the refreshed token if the server runs for longer.
-_instagram = {"token": os.getenv("INSTAGRAM_ACCESS_TOKEN", ""), "refreshed_at": time.monotonic()}
+_instagram = {
+    "token": os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip(),
+    "refreshed_at": time.monotonic(),
+}
 
 
 def instagram_token():
@@ -2256,10 +2266,16 @@ def load_instagram_posts():
     }
     token = instagram_token()
     if not token:
+        logger.warning("Instagram posts are disabled. Set INSTAGRAM_ACCESS_TOKEN.")
         return unavailable, False
     try:
         media = http_get_json(
-            "https://graph.instagram.com/me/media?" + urllib.parse.urlencode({
+            "https://graph.instagram.com/"
+            + INSTAGRAM_GRAPH_VERSION
+            + "/"
+            + urllib.parse.quote(INSTAGRAM_USER_ID, safe="")
+            + "/media?"
+            + urllib.parse.urlencode({
                 "fields": "id,media_type,media_url,thumbnail_url,permalink,caption,timestamp",
                 "limit": 12,
                 "access_token": token,
@@ -2278,7 +2294,7 @@ def load_instagram_posts():
         "caption": item.get("caption", ""),
         "timestamp": item.get("timestamp", ""),
     } for item in media.get("data", [])]
-    return {"status": "success", "profileUrl": "https://www.instagram.com/rolaz_cutz/", "posts": posts}, True
+    return {"status": "success", "profileUrl": INSTAGRAM_PROFILE_URL, "posts": posts}, True
 
 
 @app.route("/api/public/instagram", methods=["GET"])

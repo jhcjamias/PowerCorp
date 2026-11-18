@@ -3,7 +3,7 @@ import { nextTick, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '@/admin/login-page/useAuth'
 import logoUrl from '@/assets/rolaz-logo.png'
-import { MOCK_CREDENTIALS, MOCK_RESET_PIN, resetPassword, USE_MOCK_AUTH } from '@/admin/login-page/authService'
+import { resetPassword } from '@/admin/login-page/authService'
 import { validateEmail, validateNewPassword, validatePassword, validatePin, validateUsername } from '@/admin/login-page/validators'
 
 const { signIn } = useAuth()
@@ -255,11 +255,6 @@ async function onSubmit() {
       </form>
 
       <p class="footnote">Admin access only.</p>
-
-      <p v-if="USE_MOCK_AUTH" class="demo">
-        Demo mode: {{ MOCK_CREDENTIALS.username }} / {{ MOCK_CREDENTIALS.password }}
-        (forgot password: PIN {{ MOCK_RESET_PIN }})
-      </p>
     </section>
   </main>
 </template>
@@ -471,14 +466,6 @@ button:focus-visible {
 .footnote {
   margin: 8px 0 0;
   font-size: 14px;
-  color: var(--rc-muted);
-}
-
-.demo {
-  margin: 16px 0 0;
-  padding-top: 14px;
-  border-top: 1px dashed var(--rc-line);
-  font-size: 13px;
   color: var(--rc-muted);
 }
 

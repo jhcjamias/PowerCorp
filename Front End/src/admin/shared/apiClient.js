@@ -1,15 +1,14 @@
 // One place for talking to the Flask back end from the admin pages.
 //
-// MOCK MODE (default until the real endpoints exist):
-//   set VITE_USE_MOCK_API=false in "Front End/.env.local" to call the real API.
+// Real API mode is the default. Set VITE_USE_MOCK_API=true only for isolated UI work.
 //
 // Every request sends the signed-in admin's token as "Authorization: Bearer <token>".
 
 import { useAuth } from '@/admin/login-page/useAuth'
 
 export const API_URL = (import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:5000').replace(/\/$/, '')
-// A production build ("npm run build") never uses demo data, whatever the env file says.
-export const USE_MOCK_API = !import.meta.env.PROD && import.meta.env.VITE_USE_MOCK_API !== 'false'
+// A production build ("npm run build") never uses local mock data.
+export const USE_MOCK_API = !import.meta.env.PROD && import.meta.env.VITE_USE_MOCK_API === 'true'
 
 export class ApiError extends Error {
   constructor(status, message) {
