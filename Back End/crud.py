@@ -146,9 +146,15 @@ GOOGLE_REVIEWS_URL = os.getenv(
 )
 INSTAGRAM_PROFILE_URL = "https://www.instagram.com/rolaz_cutz/"
 INSTAGRAM_USER_ID = os.getenv("INSTAGRAM_USER_ID", "me").strip() or "me"
-INSTAGRAM_GRAPH_VERSION = os.getenv("INSTAGRAM_GRAPH_VERSION", "v27.0").strip()
+# A blank value means "use the default". A malformed one only disables the
+# Instagram feed; it goes into the request URL, so it is never used unchecked.
+INSTAGRAM_GRAPH_VERSION = os.getenv("INSTAGRAM_GRAPH_VERSION", "").strip() or "v27.0"
 if not re.fullmatch(r"v\d+\.\d+", INSTAGRAM_GRAPH_VERSION):
-    raise RuntimeError("INSTAGRAM_GRAPH_VERSION must look like v27.0.")
+    logger.warning(
+        "INSTAGRAM_GRAPH_VERSION %r should look like v27.0; Instagram posts are disabled.",
+        INSTAGRAM_GRAPH_VERSION,
+    )
+    INSTAGRAM_GRAPH_VERSION = ""
 
 # Reference photos customers attach to a booking. Production stores them in a
 # private S3 bucket; the browser only ever gets short-lived signed links.
@@ -2264,6 +2270,8 @@ def load_instagram_posts():
         "posts": [],
         "message": "Live Instagram posts are temporarily unavailable.",
     }
+    if not INSTAGRAM_GRAPH_VERSION:
+        return unavailable, False
     token = instagram_token()
     if not token:
         logger.warning("Instagram posts are disabled. Set INSTAGRAM_ACCESS_TOKEN.")

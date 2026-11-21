@@ -567,14 +567,14 @@ setCustomerUnauthorizedHandler(() => {
     announce('Your session expired. Sign in again to continue.');
   });
 });
+// index.html carries the live-site wording. Only the mock (demo) mode replaces it,
+// so reviewers can tell nothing is really booked or paid.
 function applyRuntimeChrome() {
-  if (CUSTOMER_CONFIG.mode !== 'http') return;
+  if (CUSTOMER_CONFIG.mode !== 'mock') return;
   const bar = document.querySelector('.prototype-bar');
-  if (bar) bar.innerHTML = '<span class="status-dot"></span><strong>LIVE BOOKING</strong><span>Appointments and availability connect to the shop booking system.</span>';
+  if (bar) bar.innerHTML = '<span class="status-dot" aria-hidden="true"></span><strong>APPROVAL PROTOTYPE</strong><span>Bookings, payments, and availability are simulated for review.</span>';
   const footerStatus = document.querySelector('.site-footer > p');
-  if (footerStatus) footerStatus.innerHTML = 'Customer booking experience<br>Appointments are confirmed by the shop system.';
-  const description = document.querySelector('meta[name="description"]');
-  if (description) description.setAttribute('content', 'Book an appointment with Rolaz Cutz Barbershop.');
+  if (footerStatus) footerStatus.innerHTML = 'Customer experience / Approval prototype<br>No real reservations or payments.';
 }
 applyRuntimeChrome();
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
